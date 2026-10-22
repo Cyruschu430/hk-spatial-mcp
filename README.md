@@ -27,6 +27,7 @@ portal's data-export conventions.
 - [Tool reference](#tool-reference)
 - [Configuration](#configuration)
 - [Data source and coverage](#data-source-and-coverage)
+- [Using it without the SDK](#using-it-without-the-sdk-or-inside-your-own-information-system)
 - [Keyless Esri services](#keyless-esri-services)
 - [Performance](#performance)
 - [SDK and design system](#sdk-and-design-system)
@@ -46,6 +47,7 @@ portal's data-export conventions.
 | **Data retrieval** | Any dataset as GeoJSON in EPSG:4326, returned as a summary (feature count, geometry types, attribute fields, bounding box) rather than a raw feature dump. |
 | **Map rendering** | One or many datasets rendered as an interactive **2D map** or **3D scene** (ArcGIS Maps SDK for JavaScript, keyless public basemap; 3D adds Terrain3D relief), served on `localhost`. |
 | **Feature inspection** | Click any feature to open an attribute card — every field from the dataset, bilingual column names where CSDI provides them, URLs rendered as links. |
+| **Answers, not just maps** | `summarise_hk_data` answers a question in text — counts, sums or averages grouped by any field — and renders a bar chart page. |
 | **Geocoding and geometry** | Address ↔ coordinate (both directions), project / buffer / simplify on any GeoJSON geometry, ground elevation, via Esri's public services. No key required. |
 | **Basemaps** | 11 keyless Esri basemap styles (imagery, topographic, streets, light/dark gray, terrain, hillshade, ocean, physical, natgeo, shaded relief) plus an optional labels overlay. |
 | **Static map export** | Render a basemap PNG (no key) into the workspace for reports and decks. |
@@ -197,7 +199,17 @@ the first charger with geometry_op and add it to the map so the coverage ring is
 並加入地圖以顯示其覆蓋範圍。
 ```
 
-### 9. Same data as a 3D scene
+### 9. Ask a question, get a table and a chart
+
+```
+Using hk-spatial, find the EV charger dataset and tell me how many public chargers there are in each
+district, with a bar chart.
+```
+```
+用 hk-spatial 搵電動車充電站數據，話我知每區有幾多個公眾充電站，並出一張棒形圖。
+```
+
+### 10. Same data as a 3D scene
 
 ```
 Using hk-spatial, take the country parks and slopes datasets and render them as a 3D scene with terrain
@@ -208,7 +220,7 @@ relief, camera tilted about 60 degrees, then give me the scene URL.
 並提供場景網址。
 ```
 
-### 10. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
+### 11. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
 
 ```
 Using hk-spatial, publish the country parks dataset to my ArcGIS Online organisation as a hosted
@@ -219,7 +231,7 @@ feature layer titled "HK Country Parks" and return the item link.
 並回報項目連結。
 ```
 
-### 11. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
+### 12. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
 
 ```
 Using hk-spatial's arcgis_request tool, list the five most recent feature layers in my ArcGIS Online
@@ -229,7 +241,7 @@ account together with their names and item IDs.
 用 hk-spatial 的 arcgis_request 工具，列出我 ArcGIS Online 帳戶中最近五個圖層服務的名稱與項目 ID。
 ```
 
-### 12. Enforce the intended workflow
+### 13. Enforce the intended workflow
 
 Load `SKILL.md` as the agent's skill or system prompt. It constrains the agent to the
 search → load → build_map sequence, prohibits fabricating data, prohibits pasting feature records into
@@ -265,6 +277,27 @@ titles, publishing organisation, last update date, relevance score and an `expor
 Downloads a dataset as GeoJSON (EPSG:4326) into the workspace and returns a summary: feature count,
 geometry types, attribute field names, bounding box and file path. Feature records are never returned
 to the model.
+
+### `summarise_hk_data(dataset_id, group_by="", value_field="", agg="count", top=20)`
+
+Answers a question about a dataset in **text**, without putting features into the chat.
+
+- No `group_by` → an overview: feature count, geometry types, the fields worth grouping by (with their
+  cardinality) and the numeric fields.
+- `group_by="NAME_OF_DISTRICT_COUNCIL_DISTRICT_EN"` → features per group.
+- `agg="sum"` (or `"avg"`) plus `value_field="MEDIUM_IEC62196_no"` → totals or averages per group.
+
+Returns an aligned text table, the same rows as data, and a `chart_url` for a rendered bar chart page.
+Example — EV charging sockets per district in Hong Kong:
+
+```text
+group                  sum of MEDIUM_IEC62196_no
+---------------------------------------------
+Kwun Tong                            1,438
+Kowloon City                         1,229
+Sha Tin                                874
+...
+```
 
 ### `build_map(dataset_ids, title="Hong Kong Spatial Data", basemap="imagery", labels=False)`
 
@@ -372,6 +405,35 @@ organisation content.
   review the individual dataset's licence before redistribution or commercial use.
 
 ---
+
+## Using it without the SDK, or inside your own information system
+
+**Nothing to install for the rendering layer.** The map and scene pages load ArcGIS Maps SDK 5 from
+`js.arcgis.com` as ES modules. There is no npm install, no bundler, no build step, and no ArcGIS account:
+the only requirement is that the viewer's browser can reach `js.arcgis.com` and
+`server.arcgisonline.com`. An agent that has never heard of the SDK still produces a working map,
+because the server writes the page and reports a URL.
+
+**The tools are plain Python.** Every tool is an ordinary function returning JSON — the MCP wrapper is
+separate. If you are building an information system (a portal, an internal dashboard, a report
+generator), import them directly and skip MCP altogether:
+
+```python
+from hk_spatial_mcp import search_hk_data, load_hk_data, summarise_hk_data, build_map
+
+hit = json.loads(search_hk_data("電動車充電", 1))["hits"][0]
+load_hk_data(hit["dataset_id"], hit["title"])
+
+stats = json.loads(summarise_hk_data(hit["dataset_id"],
+                                     "NAME_OF_DISTRICT_COUNCIL_DISTRICT_EN", "", "count"))
+print(stats["table"])          # a text answer for the UI
+print(stats["chart_url"])      # an SVG bar chart page, same origin as the map
+
+map_url = json.loads(build_map([hit["dataset_id"]], "EV chargers"))["url"]
+```
+
+That is the whole integration: text answers, a chart page, a map page — all from the same process, with
+no cloud account and no billing.
 
 ## Keyless Esri services
 

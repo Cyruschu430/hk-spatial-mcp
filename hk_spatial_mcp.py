@@ -477,6 +477,132 @@ def export_static_map(bbox: str | list | None = None, center: str | list | None 
                        "note": "basemap only — CSDI features are not drawn on this image"})
 
 
+
+# ---------------------------------------------------------------- answers in text + charts
+
+def _cached_features(dataset_id: str):
+    """Features of a dataset, from the local cache (downloads only if missing)."""
+    p = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', dataset_id)}.geojson"
+    if not p.exists():
+        r = json.loads(load_hk_data(dataset_id))
+        if r.get("error"):
+            return None, r
+    return json.loads(p.read_text(encoding="utf-8")).get("features") or [], None
+
+
+def _num(v):
+    try:
+        return float(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def summarise_hk_data(dataset_id: str, group_by: str = "", value_field: str = "",
+                      agg: str = "count", top: int = 20) -> str:
+    """Answer a question about a dataset in TEXT (and a bar chart), without putting features in the chat.
+
+    - `group_by` empty: an overview — feature count, geometry, which fields are worth grouping by.
+    - `group_by="NAME_OF_DISTRICT_COUNCIL_DISTRICT_EN"` with `agg="count"`: how many features per group.
+    - `agg="sum"` / `"avg"` with `value_field="MEDIUM_IEC62196_no"`: totals or averages per group.
+    Returns an aligned text table, the same rows as data, and a chart URL served on localhost.
+    """
+    feats, err = _cached_features(dataset_id)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+    if not feats:
+        return json.dumps({"error": f"{dataset_id}: no features to summarise"})
+    props = [f.get("properties") or {} for f in feats]
+    geoms = sorted({(f.get("geometry") or {}).get("type") or "?" for f in feats})
+
+    if not group_by:
+        counts = {}
+        for row in props:
+            for k, v in row.items():
+                if k.startswith("__") or v in (None, ""):
+                    continue
+                counts.setdefault(k, set()).add(str(v))
+        groupable = sorted(((k, len(s)) for k, s in counts.items() if 2 <= len(s) <= 60),
+                           key=lambda kv: kv[1])[:10]
+        numeric = sorted({k for row in props for k, v in row.items()
+                          if not k.startswith("__") and _num(v) is not None})
+        return json.dumps({
+            "dataset_id": dataset_id, "features": len(feats), "geometry": geoms,
+            "groupable_fields": [{"field": k, "distinct": n} for k, n in groupable],
+            "numeric_fields": numeric[:12],
+            "next": "call again with group_by=<field> (and optionally agg/value_field) for counts, "
+                    "sums or averages with a chart",
+        }, ensure_ascii=False)
+
+    if group_by not in props[0]:
+        return json.dumps({"error": f"{dataset_id}: no field {group_by!r}",
+                           "fields": list(props[0].keys())[:25]}, ensure_ascii=False)
+    buckets: dict = {}
+    for row in props:
+        key = str(row.get(group_by) or "(blank)")
+        val = _num(row.get(value_field)) if value_field else None
+        b = buckets.setdefault(key, [0, 0.0])
+        b[0] += 1
+        if val is not None:
+            b[1] += val
+    mode = agg if agg in ("count", "sum", "avg") else ("sum" if value_field else "count")
+    rows = []
+    for key, (n, total) in buckets.items():
+        rows.append({"group": key, "count": n,
+                     "value": round(total if mode == "sum" else (total / n if n else 0), 2)
+                     if mode != "count" else n})
+    rows.sort(key=lambda r: -r["value"])
+    rows = rows[:max(1, int(top))]
+    label = {"count": "features", "sum": f"sum of {value_field}", "avg": f"avg of {value_field}"}[mode]
+    w = min(28, max([len(r["group"]) for r in rows] + [len("group")]))
+    table = [f"{'group':<{w}}  {label:>18}", "-" * (w + 20)]
+    for r in rows:
+        table.append(f"{r['group'][:w]:<{w}}  {r['value']:>18,.2f}".replace(".00", ""))
+    chart_url = _chart_page(f"{dataset_id} — {label} by {group_by}", rows, w)
+    return json.dumps({"dataset_id": dataset_id, "group_by": group_by, "aggregation": label,
+                       "groups": len(buckets), "rows": rows, "table": "\n".join(table),
+                       "chart_url": chart_url,
+                       "basis": f"{len(feats)} features from the local cache"}, ensure_ascii=False)
+
+
+def _chart_page(title: str, rows, width_chars: int) -> str:
+    """One SVG bar chart page, no dependency. ponytail: bars only — swap in a chart lib when a
+    client needs more than one chart type."""
+    W, row_h, pad, left = 860, 30, 24, 300
+    h = pad * 2 + row_h * len(rows) + 40
+    top = max((r["value"] for r in rows), default=1) or 1
+    colours = ["#3fe0d0", "#f5a524", "#7c8cff", "#ff6b9d", "#8ce99a", "#ffd43b", "#6ee7f9"]
+    bars = []
+    for i, r in enumerate(rows):
+        y = pad + 40 + i * row_h
+        # leave room for the value label, otherwise the longest bar pushes it off the canvas
+        bw = max(2, int((W - left - pad - 90) * (r["value"] / top)))
+        bars.append(
+            f'<text x="{left - 10}" y="{y + 15}" text-anchor="end" fill="#c9d5e3" '
+            f'font-size="12">{_esc(str(r["group"])[:34])}</text>'
+            f'<rect x="{left}" y="{y + 3}" width="{bw}" height="{row_h - 10}" rx="4" '
+            f'fill="{colours[i % len(colours)]}" opacity=".85"/>'
+            f'<text x="{left + bw + 8}" y="{y + 15}" fill="#8fa3ba" font-size="11">'
+            f'{r["value"]:,.0f}</text>')
+    svg = (f'<svg viewBox="0 0 {W} {h}" width="100%" style="max-width:{W}px" '
+           f'xmlns="http://www.w3.org/2000/svg">'
+           f'<text x="{pad}" y="{pad + 14}" fill="#eaf0f7" font-size="15" font-weight="600">'
+           f'{_esc(title)[:78]}{"…" if len(_esc(title)) > 78 else ""}</text>'
+           + "".join(bars) + "</svg>")
+    html = ("<!doctype html><meta charset=utf-8><title>" + _esc(title) + "</title>"
+            "<body style='margin:0;background:#0b1018;color:#eaf0f7;"
+            "font:13px/1.5 ui-sans-serif,system-ui,sans-serif'>"
+            f"<div style='padding:22px'>{svg}"
+            "<p style='color:#5f7185;font-size:11px'>Data: CSDI portal.csdi.gov.hk · "
+            "Powered by Esri</p></div>")
+    (WORK / "chart.html").write_text(html, encoding="utf-8")
+    _serve()
+    return (PUBLIC + "/chart.html") if PUBLIC else f"http://localhost:{PORT}/chart.html"
+
+
+def _esc(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
 # ---------------------------------------------------------------- ArcGIS Online
 
 NO_TOKEN = ("ARCGIS_TOKEN is not set. Publishing and org-content reads need an ArcGIS Online "
@@ -740,8 +866,9 @@ def main():
     except ImportError:
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
-    for fn in (search_hk_data, load_hk_data, build_map, build_scene, geocode_address, geometry_op,
-               elevation_at, export_static_map, arcgis_request, publish_layer):
+    for fn in (search_hk_data, load_hk_data, summarise_hk_data, build_map, build_scene,
+               geocode_address, geometry_op, elevation_at, export_static_map, arcgis_request,
+               publish_layer):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":
@@ -797,6 +924,12 @@ if __name__ == "__main__":
                                            size="600,400"))
         assert png.get("bytes", 0) > 5000, png
         print(f"  static map -> {png['file'].split('/')[-1]} ({png['bytes']} bytes)")
+        agg = json.loads(summarise_hk_data("epd_rcd_1631080339740_69941",
+                                           "NAME_OF_DISTRICT_COUNCIL_DISTRICT_EN", "", "count", 50))
+        assert sum(r["count"] for r in agg["rows"]) == 989, agg["rows"]
+        assert "chart.html" in agg["chart_url"], agg["chart_url"]
+        assert "<svg" in _http(agg["chart_url"]).decode(), "chart page not served"
+        print(f"  summarise   -> {len(agg['rows'])} groups, {agg['rows'][0]['count']} max, chart served")
         hits = json.loads(search_hk_data("country park", 3))["hits"]
         s = json.loads(load_hk_data(hits[0]["dataset_id"], hits[0]["title"]))
         assert s.get("features", 0) > 0, s

@@ -26,6 +26,7 @@ portal's data-export conventions.
 - [Configuration](#configuration)
 - [Data source and coverage](#data-source-and-coverage)
 - [Design notes](#design-notes)
+- [FAQ](#faq)
 - [Troubleshooting](#troubleshooting)
 - [Verification](#verification)
 - [Licensing and attribution](#licensing-and-attribution)
@@ -251,7 +252,12 @@ organisation content.
 | Variable | Default | Purpose |
 |---|---|---|
 | `HK_MCP_DIR` | `./hk-spatial` | Workspace for the catalogue cache, downloaded GeoJSON and the generated map |
-| `HK_MCP_PORT` | `8777` | Port for the local map preview server (bound to `127.0.0.1`) |
+| `HK_MCP_PORT` | `8777` | Port for the map preview server |
+| `HK_MCP_BIND` | `127.0.0.1` | Bind address for the map preview server; set `0.0.0.0` only behind a reverse proxy |
+| `HK_MCP_PUBLIC_URL` | *(empty)* | Public base URL that `build_map` returns, e.g. `https://maps.example.hk/` |
+| `HK_MCP_TRANSPORT` | `stdio` | `stdio`, `streamable-http` or `sse` |
+| `HK_MCP_HOST` | `127.0.0.1` | Bind address for the HTTP transport |
+| `HK_MCP_HTTP_PORT` | `8788` | Port for the HTTP transport (endpoint `/mcp`) |
 | `ARCGIS_TOKEN` | *(empty)* | ArcGIS Online user/OAuth token; required only for the content and publishing tools |
 | `ARCGIS_URL` | `https://www.arcgis.com` | Portal base URL, for ArcGIS Enterprise deployments |
 
@@ -287,6 +293,94 @@ organisation content.
   licensing requirement of the basemap — keep "Powered by Esri" visible if you adapt the template.
 
 ---
+
+## FAQ
+
+### Do I need an ArcGIS account?
+
+No. `search_hk_data`, `load_hk_data` and `build_map` need no account, no key and no subscription —
+the basemap uses Esri's keyless public tiles and CSDI itself is open data. Only `publish_layer` and
+`arcgis_request` require `ARCGIS_TOKEN`; without it they return a clear error and the other three tools
+continue to work normally. If you never need ArcGIS Online, ignore those two tools entirely: the
+GeoJSON is already on disk, so you can ship it to your own server, a static site, or any other viewer.
+
+### What about geoprocessing / spatial analysis?
+
+There is no built-in analysis engine, and that is deliberate — the server's job is to get authoritative
+data out of CSDI intact. Two supported routes:
+
+1. **ArcGIS Online geoprocessing.** Locate a GP service task and drive it through `arcgis_request`:
+   `submitJob` with the parameters, then poll `jobs/<jobId>`. This requires `ARCGIS_TOKEN`, and the
+   service consumes organisation credits. The request passthrough itself is implemented and its token
+   handling is tested; a live geoprocessing run has **not** been exercised in this repository's test
+   suite (no test organisation credentials are bundled), so validate against your own service before
+   relying on it.
+2. **Local analysis.** Every dataset is on disk as GeoJSON in EPSG:4326, so an agent can process it with
+   whatever Python stack is installed (`shapely`, `pyproj`, `geopandas`, `duckdb spatial`) and hand the
+   result back through `build_map`. This keeps the analysis explainable and free of credit costs.
+
+### Are any web development dependencies required?
+
+None. `build_map` writes a single static HTML file and serves it with Python's standard-library HTTP
+server. The map library (ArcGIS Maps SDK for JavaScript) is loaded as ES modules from
+`js.arcgis.com/5.0` — no npm, no Node.js, no bundler, no build step, no transpiler. The generated page
+is plain HTML/CSS/JS you can open, edit or re-host anywhere.
+
+Requirement to be aware of: the browser must be able to reach `js.arcgis.com` and
+`server.arcgisonline.com`. In an air-gapped or restricted intranet deployment the map will render blank —
+self-host the SDK assets and substitute a locally reachable tile source in that case.
+
+On the server side the only dependency is the `mcp` package (`uvx` installs it automatically); everything
+else is the Python standard library.
+
+### Does it work alongside other agent skills and tools?
+
+Yes. It is a standard MCP server over stdio or HTTP, so it composes in the same client with any other
+MCP server — file system, git, web search, databases, or other geospatial servers. Nothing here assumes it
+is the only tool available.
+
+Two mechanisms improve reliability when several tools are present:
+
+- **`SKILL.md`** — load it as the agent's skill or system prompt to pin the search → load → build_map
+  sequence and prohibit ad-hoc HTTP code.
+- **Self-describing tool metadata** — each tool documents its arguments and return shape, so most clients
+  route correctly without extra prompting.
+
+The wider GIS MCP ecosystem (including Esri's ArcGIS Location Services MCP and various ArcGIS Pro /
+ArcPy bridges) is complementary rather than duplicative: those expose geoprocessing and location services,
+whereas this server's focus is the CSDI data layer.
+
+### Can it run as a remote MCP server?
+
+Yes. stdio is only the default. Set the transport and it serves MCP over HTTP:
+
+```bash
+HK_MCP_TRANSPORT=streamable-http HK_MCP_HOST=0.0.0.0 HK_MCP_HTTP_PORT=8788 python3 hk_spatial_mcp.py
+# endpoint: POST http://<host>:8788/mcp   (text/event-stream; `sse` is also supported)
+```
+
+Verified in this repository: `initialize` and `tools/list` succeed over Streamable HTTP. Clients that
+support HTTP MCP servers connect to the URL and headers instead of spawning a process.
+
+Two things must be configured for the map to be usable by a remote caller:
+
+```bash
+HK_MCP_BIND=0.0.0.0                       # let the map preview server accept non-loopback traffic
+HK_MCP_PUBLIC_URL=https://maps.example.hk/  # the URL build_map returns to the caller
+```
+
+**Deployment caveats — read before exposing it:**
+
+- **This repository does not host, deploy or operate any server.** Running it remotely is entirely the
+  operator's responsibility.
+- **There is no built-in authentication.** Do not expose the port to the internet directly. Terminate TLS
+  and enforce a bearer token or OAuth at a reverse proxy in front of it (MCP's OAuth flow requires an
+  authorization server, which is out of scope here).
+- **A shared `ARCGIS_TOKEN` makes every caller act as that account.** For any multi-user deployment, issue
+  per-user tokens, or expose read-only tools only, or omit the publishing tools from the deployed build.
+- **State is per process.** The workspace directory and the single map preview are shared by all callers,
+  so concurrent users overwrite each other's map. For real multi-tenant use, run one process (with its own
+  `HK_MCP_DIR`) per user or per session.
 
 ## Troubleshooting
 

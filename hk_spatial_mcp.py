@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """hk-spatial-mcp — an MCP server for Hong Kong CSDI spatial data.
 
-One file, stdlib + `mcp`. Works with any MCP client over stdio.
-Run:  python3 hk_spatial_mcp.py            (stdio MCP server)
+One file, stdlib + `mcp`. Works with any MCP client, locally (stdio) or remotely (HTTP).
+Run:  python3 hk_spatial_mcp.py            (stdio MCP server, default)
+      HK_MCP_TRANSPORT=streamable-http python3 hk_spatial_mcp.py   (remote / HTTP)
       python3 hk_spatial_mcp.py --selftest
 Env:
-  HK_MCP_DIR    workspace dir (default ./hk-spatial)
-  HK_MCP_PORT   local preview port (default 8777)
-  ARCGIS_TOKEN  ArcGIS Online user/OAuth token (only needed for org content: publish/retrieve)
-  ARCGIS_URL    portal base, default https://www.arcgis.com
+  HK_MCP_DIR          workspace dir (default ./hk-spatial)
+  HK_MCP_PORT         map preview port (default 8777)
+  HK_MCP_BIND         map preview bind address (default 127.0.0.1; 0.0.0.0 behind a proxy)
+  HK_MCP_PUBLIC_URL   public base URL returned by build_map, e.g. https://maps.example.hk/
+  HK_MCP_TRANSPORT    stdio (default) | streamable-http | sse
+  HK_MCP_HOST         HTTP transport bind address (default 127.0.0.1)
+  HK_MCP_HTTP_PORT    HTTP transport port (default 8788)
+  ARCGIS_TOKEN        ArcGIS Online user/OAuth token (only needed for org content: publish/retrieve)
+  ARCGIS_URL          portal base, default https://www.arcgis.com
 """
 import json
 import os
@@ -27,6 +33,8 @@ CSDI_FILE = "https://portal.csdi.gov.hk/csdi-webpage/file-api?dataset_id={}&form
 AGOL = os.environ.get("ARCGIS_URL", "https://www.arcgis.com").rstrip("/") + "/sharing/rest"
 WORK = pathlib.Path(os.environ.get("HK_MCP_DIR") or "hk-spatial").resolve()
 PORT = int(os.environ.get("HK_MCP_PORT") or 8777)
+BIND = os.environ.get("HK_MCP_BIND") or "127.0.0.1"
+PUBLIC = (os.environ.get("HK_MCP_PUBLIC_URL") or "").rstrip("/")
 
 CSW_BODY = """<?xml version="1.0"?><csw:GetRecords service="CSW" version="2.0.2" maxRecords="{n}" resultType="results" outputSchema="http://www.opengis.net/cat/csw/2.0.2" xmlns:csw="http://www.opengis.net/cat/csw/2.0.2"><csw:Query typeNames="csw:Record"><csw:ElementSetName>summary</csw:ElementSetName><csw:Constraint version="1.1.0"><ogc:Filter xmlns:ogc="http://www.opengis.net/ogc"><ogc:PropertyIsLike wildCard="%" singleChar="_" escapeChar="\\"><ogc:PropertyName>AnyText</ogc:PropertyName><ogc:Literal>%{kw}%</ogc:Literal></ogc:PropertyIsLike></ogc:Filter></csw:Constraint></csw:Query></csw:GetRecords>"""
 
@@ -218,7 +226,7 @@ def _serve():
         WORK.mkdir(parents=True, exist_ok=True)
         h = lambda *a, **k: SimpleHTTPRequestHandler(*a, directory=str(WORK), **k)
         try:
-            srv = ThreadingHTTPServer(("127.0.0.1", PORT), h)
+            srv = ThreadingHTTPServer((BIND, PORT), h)
         except OSError:  # port already serving an earlier run — fine, nothing to do
             _serve_state["up"] = True
             return
@@ -265,7 +273,8 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
     WORK.mkdir(parents=True, exist_ok=True)
     (WORK / "index.html").write_text(html, encoding="utf-8")
     _serve()
-    return json.dumps({"url": f"http://localhost:{PORT}/", "layers": [l["id"] for l in layers],
+    return json.dumps({"url": (f"{PUBLIC}/" if PUBLIC else f"http://localhost:{PORT}/"),
+                       "layers": [l["id"] for l in layers],
                        "features": sum(len(l["data"]["features"]) if "data" in l else 0 for l in layers),
                        "missing": missing, "warn": warn,
                        "next": "open the url in your client's browser/preview pane (refresh to see changes)"})
@@ -466,7 +475,22 @@ def main():
     mcp = Server("hk-spatial")
     for fn in (search_hk_data, load_hk_data, build_map, arcgis_request, publish_layer):
         mcp.tool()(fn)
-    mcp.run()
+    transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
+    if transport == "stdio":
+        mcp.run()
+        return
+    host = os.environ.get("HK_MCP_HOST") or "127.0.0.1"
+    port = int(os.environ.get("HK_MCP_HTTP_PORT") or 8788)
+    if hasattr(mcp, "settings"):  # mcp 1.x FastMCP reads bind details from mcp.settings
+        for attr, val in (("host", host), ("port", port)):
+            try:
+                setattr(mcp.settings, attr, val)
+            except Exception:
+                pass  # mcp 2.x validates settings; host/port come from run() kwargs
+    try:
+        mcp.run(transport=transport, host=host, port=port)
+    except TypeError:  # server reads settings/env instead of kwargs
+        mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

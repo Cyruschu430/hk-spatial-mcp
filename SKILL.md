@@ -7,8 +7,10 @@ description: Get Hong Kong CSDI spatial data onto an ArcGIS web map, publish it 
 
 ## The 3-step loop — do NOT write fetch code yourself
 
-1. `search_hk_data("country park")` → pick a `dataset_id`. **Keywords must be English** (CSDI metadata
-   is English only): "public toilet", "pedestrian", "building", "rainfall", "Wan Chai", "Sha Tin".
+1. `search_hk_data("公廁")` / `search_hk_data("pedestrian")` → pick a `dataset_id`. **English or Chinese
+   both work** (index covers 繁體/简体 titles + keywords + abstracts, with HK synonym expansion).
+   No keyword = browse the whole catalogue page by page (`offset`). Check `exportable` — 13 datasets
+   are metadata-only and have no GeoJSON to map.
 2. `load_hk_data(dataset_id, name="Country Parks")` → returns a summary only. Never paste features
    into the chat; the data is already on disk.
 3. `build_map([dataset_id, ...], "Title")` → returns `http://localhost:8777/`. Tell the user to open

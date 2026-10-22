@@ -31,7 +31,7 @@ Then in the chat:
 
 | Tool | Does |
 |---|---|
-| `search_hk_data(keyword, limit=8)` | CSDI catalogue search (English keywords) → `dataset_id` + title |
+| `search_hk_data(keyword="", limit=10, offset=0)` | search **all ~1150 CSDI datasets** (English **or Chinese**, ranked). Empty keyword = browse |
 | `load_hk_data(dataset_id, name="")` | download dataset as GeoJSON (WGS84) → **summary** (count, fields, bbox, file path) |
 | `build_map(dataset_ids, title)` | build the ArcGIS Maps SDK web map + serve it on `http://localhost:8777` |
 | `arcgis_request(path, params, method)` | any ArcGIS Online REST call with the token (search items, item data, feature queries, GP jobs) |
@@ -42,6 +42,12 @@ read or create org content — use a user/OAuth token.
 
 ## Notes
 
+- **Coverage**: the whole CSDI catalogue (1154 datasets, verified 2026-10-22) is harvested in one
+  request and cached in the workspace for 7 days (`catalog.json`) — search runs offline over titles,
+  keywords and abstracts in English + 繁體 + 简体, so ranking is not limited to what a server-side
+  `AnyText` match returns. 13 metadata-only datasets have no GeoJSON export (`exportable: false`).
+- **Chinese queries** are expanded with Hong Kong wording (廁所 → 洗手間, 行人路 → pedestrian,
+  電動車 → electric vehicle charging, 巴士 → bus, 郊野公園 → country park, …).
 - Basemap is keyless (Esri World Imagery tiles) with the SDK's own attribution — keep "Powered by Esri".
 - Data source: CSDI portal (`portal.csdi.gov.hk`), CSW 2.0.2 catalogue + `file-api` GeoJSON (EPSG:4326).
 - Workspace defaults to `./hk-spatial` (`HK_MCP_DIR`), preview port `HK_MCP_PORT` (default 8777).

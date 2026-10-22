@@ -15,6 +15,8 @@ import pathlib
 import re
 import secrets
 import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -28,37 +30,128 @@ PORT = int(os.environ.get("HK_MCP_PORT") or 8777)
 CSW_BODY = """<?xml version="1.0"?><csw:GetRecords service="CSW" version="2.0.2" maxRecords="{n}" resultType="results" outputSchema="http://www.opengis.net/cat/csw/2.0.2" xmlns:csw="http://www.opengis.net/cat/csw/2.0.2"><csw:Query typeNames="csw:Record"><csw:ElementSetName>summary</csw:ElementSetName><csw:Constraint version="1.1.0"><ogc:Filter xmlns:ogc="http://www.opengis.net/ogc"><ogc:PropertyIsLike wildCard="%" singleChar="_" escapeChar="\\"><ogc:PropertyName>AnyText</ogc:PropertyName><ogc:Literal>%{kw}%</ogc:Literal></ogc:PropertyIsLike></ogc:Filter></csw:Constraint></csw:Query></csw:GetRecords>"""
 
 
+CSW_ALL = """<?xml version="1.0"?><csw:GetRecords service="CSW" version="2.0.2" maxRecords="{n}" startPosition="1" resultType="results" outputSchema="http://www.opengis.net/cat/csw/2.0.2" xmlns:csw="http://www.opengis.net/cat/csw/2.0.2"><csw:Query typeNames="csw:Record"><csw:ElementSetName>full</csw:ElementSetName></csw:Query></csw:GetRecords>"""
+
+
 def _http(url, data=None, headers=None, timeout=60):
     req = urllib.request.Request(url, data=data, headers=headers or {})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
-# ---------------------------------------------------------------- CSDI
+# ---------------------------------------------------------------- CSDI catalogue
 
-def search_hk_data(keyword: str, limit: int = 8) -> str:
-    """Search the Hong Kong CSDI catalogue (1100+ official datasets). Returns dataset_id + title.
+# Hong Kong Chinese term -> catalogue wording. CSDI titles are often 洗手間 where users say 廁所.
+SYNONYMS = {
+    "廁所": "洗手間 toilets", "洗手間": "toilets", "公廁": "洗手間 toilets",
+    "樓宇": "building 大廈", "大廈": "building 樓宇", "建築物": "building",
+    "行人路": "pedestrian footpath walkway 行人", "行人": "pedestrian 行人路",
+    "巴士": "bus 巴士站", "港鐵": "mtr railway 鐵路", "渡輪": "ferry 碼頭",
+    "學校": "school 學校", "醫院": "hospital 醫院", "診所": "clinic 診所",
+    "垃圾": "waste refuse 廢物", "回收": "recycling 回收", "樹": "tree 樹木",
+    "充電": "charging 電動車", "電動車": "electric vehicle charging 電動車",
+    "雨量": "rainfall 雨量", "降雨": "rainfall 雨量", "斜坡": "slope 斜坡",
+    "郊野公園": "country park 郊野公園", "海岸公園": "marine park 海岸",
+    "停車場": "parking car park 停車", "海灘": "beach 泳灘", "泳灘": "beach",
+    "單車": "cycling bicycle 單車徑", "渠務": "drainage sewer 渠",
+    "水管": "water main 水管", "煤氣": "gas 氣體", "電纜": "cable 電纜",
+    "地契": "lease 地段", "分區計劃大綱": "outline zoning plan 分區計劃大綱",
+    "屋邨": "estate 屋邨", "公屋": "public housing 公營房屋", "私樓": "private housing",
+    "火警": "fire 消防", "消防局": "fire station 消防局", "警署": "police 警署",
+    "街市": "market 街市", "墳場": "cemetery columbarium 墳",
+    "空氣": "air quality 空氣", "水質": "water quality 水質", "山泥傾瀉": "landslide 山泥傾瀉",
+}
 
-    Keywords must be ENGLISH — CSDI metadata is English only ("country park", "public toilet",
-    "pedestrian", "land boundary", "rainfall", "zoning"). Place names work: "Wan Chai", "Sha Tin".
-    """
-    kw = keyword.replace("%", "").replace("'", "")
-    body = CSW_BODY.format(n=max(1, min(limit, 50)), kw=kw).encode()
-    xml = _http(CSDI_CSW, body, {"Content-Type": "application/xml"}).decode("utf-8", "replace")
+
+def _catalog(force: bool = False) -> list:
+    """The WHOLE CSDI catalogue (1150+ datasets) in one request, cached on disk for 7 days.
+    Full element set = English + 繁體/简体 titles, keywords and abstracts."""
+    cache = WORK / "catalog.json"
+    if not force and cache.exists() and time.time() - cache.stat().st_mtime < 7 * 86400:
+        return json.loads(cache.read_text(encoding="utf-8"))
+    body = CSW_ALL.format(n=5000).encode()
+    xml = _http(CSDI_CSW, body, {"Content-Type": "application/xml"}, timeout=300).decode("utf-8", "replace")
     out = []
-    for rec in re.findall(r"<csw:SummaryRecord>(.*?)</csw:SummaryRecord>", xml, re.S):
-        g = lambda t: ((re.search(rf"<dc:{t}>(.*?)</dc:{t}>", rec, re.S) or [None, None])[1] or "").strip()
-        if g("identifier"):
-            out.append({"dataset_id": g("identifier"), "title": g("title")})
+    for rec in re.findall(r"<csw:Record>(.*?)</csw:Record>", xml, re.S):
+        g = lambda t: re.sub(r"\s+", " ", "".join(re.findall(rf"<{t}>(.*?)</{t}>", rec, re.S))).strip()
+        did = g("dc:identifier")
+        if not did:
+            continue
+        out.append({
+            "id": did, "title": g("dc:title"), "title_zh": g("dc:title_tc") or g("dc:title_sc"),
+            "kw": [k.strip() for k in re.findall(r'<dc:subject scheme="keywords">(.*?)</dc:subject>', rec, re.S)],
+            "abstract": g("dct:abstract")[:300], "abstract_zh": (g("dct:abstract_tc") or g("dct:abstract_sc"))[:300],
+            "org": g("dc:creator"), "updated": g("dct:modified")[:10],
+            "exportable": "_rcd_" in did,  # 13 metadata-only datasets 404 on export
+        })
     if not out:
-        return json.dumps({"hits": [], "note": f"No dataset matched {keyword!r}. Try English synonyms."})
-    return json.dumps({"hits": out}, ensure_ascii=False)
+        raise RuntimeError("CSDI catalogue harvest returned 0 records (endpoint changed?)")
+    WORK.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    return out
+
+
+def _score(query: str, d: dict) -> int:
+    q = query.lower().strip()
+    terms = [t for t in re.split(r"\s+", q) if t]
+    terms += [w for w in (SYNONYMS.get(q) or "").split() if w] if q in SYNONYMS else \
+             [w for t in terms for w in (SYNONYMS.get(t) or "").split()]
+    title = f"{d['title']} {d['title_zh']}".lower()
+    kw = " ".join(d["kw"]).lower()
+    abst = f"{d['abstract']} {d['abstract_zh']}".lower()
+    s = 0
+    for t in terms:
+        s += 8 * (t in title) + 4 * (t in kw) + 2 * (t in abst)
+        s += 4 * (title.startswith(t) or title.split(" ")[0] == t)
+    return s
+
+
+def search_hk_data(keyword: str = "", limit: int = 10, offset: int = 0) -> str:
+    """Search ALL ~1150 CSDI datasets locally (English or Chinese), ranked. No keyword = browse.
+
+    Chinese and English both work — Chinese terms are expanded with Hong Kong usage
+    (廁所 -> 洗手間, 行人路 -> pedestrian, 電動車 -> electric vehicle charging, …).
+    Returns dataset_id + bilingual title + why it matched. Feed dataset_id to load_hk_data().
+    """
+    cat = _catalog()
+    limit, offset = max(1, min(limit, 30)), max(0, offset)
+    if not keyword.strip():
+        page = cat[offset:offset + limit]
+        return json.dumps({"total_datasets": len(cat), "offset": offset,
+                           "hits": [{"dataset_id": d["id"], "title": d["title"],
+                                     "title_zh": d["title_zh"], "org": d["org"]} for d in page]},
+                          ensure_ascii=False)
+    # shorter title breaks score ties: "Building" beats "Quality Water Supply Scheme for Buildings – …"
+    ranked = sorted(((s, d) for d in cat if (s := _score(keyword, d)) > 0),
+                    key=lambda kv: (-kv[0], len(kv[1]["title"]), kv[1]["title"]))
+    hits = [{"dataset_id": d["id"], "title": d["title"], "title_zh": d["title_zh"],
+             "org": d["org"], "updated": d["updated"], "score": s,
+             "exportable": d["exportable"],
+             "match": d["abstract"][:150] or d["abstract_zh"][:150]}
+            for s, d in ranked[offset:offset + limit]]
+    if not hits and offset == 0:  # nothing local -> ask the catalogue server (broad recall)
+        body = CSW_BODY.format(n=limit, kw=keyword.replace("%", "").replace("'", "")).encode()
+        xml = _http(CSDI_CSW, body, {"Content-Type": "application/xml"}).decode("utf-8", "replace")
+        hits = [{"dataset_id": t[0], "title": re.sub(r"\s+", " ", t[1]).strip(), "source": "csw"}
+                for t in ((i, x) for i, x in zip(re.findall(r"<dc:identifier>(.*?)</dc:identifier>", xml, re.S),
+                                                 re.findall(r"<dc:title>(.*?)</dc:title>", xml, re.S)))]
+    return json.dumps({"query": keyword, "matched": len(ranked),
+                       "total_datasets": len(cat), "hits": hits,
+                       "next": "load_hk_data(dataset_id) then build_map([...])"}, ensure_ascii=False)
 
 
 def load_hk_data(dataset_id: str, name: str = "") -> str:
     """Download one CSDI dataset as GeoJSON (WGS84) into the workspace. Returns a SUMMARY, not the
     data itself — never paste the features into the chat, put them on a map with build_map()."""
-    fc = json.loads(_http(CSDI_FILE.format(urllib.parse.quote(dataset_id)), timeout=120))
+    try:
+        fc = json.loads(_http(CSDI_FILE.format(urllib.parse.quote(dataset_id)), timeout=180))
+    except urllib.error.HTTPError as e:
+        return json.dumps({
+            "error": f"{dataset_id}: HTTP {e.code} from the CSDI export endpoint",
+            "likely": "metadata-only / non-spatial dataset (13 of ~1150 have no GeoJSON export), "
+                      "or the id is wrong — call search_hk_data() and use a hit whose exportable is true",
+            "metadata_page": f"https://portal.csdi.gov.hk/geoportal/rest/metadata/item/{dataset_id}/html",
+        }, ensure_ascii=False)
     feats = fc.get("features") or []
     if not feats:
         return json.dumps({"error": f"{dataset_id}: dataset returned 0 features (not spatial or empty)"})
@@ -130,7 +223,7 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
     Open the returned URL in WorkBuddy's Preview tab."""
     if isinstance(dataset_ids, str):
         dataset_ids = [dataset_ids]
-    layers, missing = [], []
+    layers, missing, warn = [], [], []
     for did in dataset_ids:
         p = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', did)}.geojson"
         if not p.exists():
@@ -140,8 +233,19 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
                 continue
             p = pathlib.Path(r["file"])
         label = p.with_suffix(".name")
-        layers.append({"id": did, "name": label.read_text(encoding="utf-8") if label.exists() else did,
-                       "data": json.loads(p.read_text(encoding="utf-8"))})
+        fc = json.loads(p.read_text(encoding="utf-8"))
+        entry = {"id": did, "name": label.read_text(encoding="utf-8") if label.exists() else did}
+        # ponytail: inline up to 3000 features; bigger layers stream from the served file so the
+        # HTML stays small (61k polygons inline = tens of MB, browser dies).
+        if len(fc.get("features") or []) > 3000:
+            entry["url"] = f"data/{p.name}"
+            if p.stat().st_size > 60_000_000:  # honest warning, never silently sample the data
+                warn.append(f"{did} is {p.stat().st_size // 1_000_000} MB / "
+                            f"{len(fc['features'])} features — the browser will be slow; "
+                            f"pick a smaller or district-level dataset for a live demo")
+        else:
+            entry["data"] = fc
+        layers.append(entry)
     if not layers:
         return json.dumps({"error": "nothing to map", "details": missing})
     html = TEMPLATE.replace("/*%TITLE%*/", json.dumps(title, ensure_ascii=False))
@@ -150,8 +254,8 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
     (WORK / "index.html").write_text(html, encoding="utf-8")
     _serve()
     return json.dumps({"url": f"http://localhost:{PORT}/", "layers": [l["id"] for l in layers],
-                       "features": sum(len(l["data"].get("features") or []) for l in layers),
-                       "missing": missing,
+                       "features": sum(len(l["data"]["features"]) if "data" in l else 0 for l in layers),
+                       "missing": missing, "warn": warn,
                        "next": "open the url in WorkBuddy's Preview tab (refresh it to see changes)"})
 
 
@@ -302,7 +406,8 @@ const box = document.getElementById("layers");
 
 LAYERS.forEach((L, i) => {
   const color = COLORS[i % COLORS.length];
-  const gtype = ((L.data.features || [])[0] || {}).geometry?.type || "Point";
+  const feats = L.data?.features || [];
+  const gtype = (feats[0] || {}).geometry?.type || "Point";
   const isPoint = gtype.includes("Point");
   const isLine = gtype.includes("Line");
   const symbol = isPoint
@@ -311,10 +416,11 @@ LAYERS.forEach((L, i) => {
       ? { type: "simple-line", color, width: 2 }
       : { type: "simple-fill", color: [...hex(color), 0.35],
           outline: { color, width: 1.2 } };
-  const gl = new GeoJSONLayer({
-    title: L.id, data: L.data, popupEnabled: true, outFields: ["*"],
-    renderer: { type: "simple", symbol }
-  });
+  const opts = { title: L.name || L.id, url: L.url, data: L.data,
+                 popupEnabled: true, outFields: ["*"] };
+  // a url-based layer has no geometry to inspect — let GeoJSONLayer auto-render it
+  if (!L.url) opts.renderer = { type: "simple", symbol };
+  const gl = new GeoJSONLayer(opts);
   map.add(gl);
 
   const row = document.createElement("label");
@@ -322,7 +428,7 @@ LAYERS.forEach((L, i) => {
   row.innerHTML = `<input type="checkbox" checked>
     <span class="sw" style="background:${color}"></span>
     <span class="nm" title="${L.id}">${L.name || L.id}</span>
-    <span class="ct">${(L.data.features || []).length}</span>`;
+    <span class="ct">${L.url ? "large" : feats.length}</span>`;
   row.querySelector("input").onchange = e => { gl.visible = e.target.checked; };
   box.appendChild(row);
 });
@@ -357,9 +463,16 @@ if __name__ == "__main__":
         import tempfile
         globals()["WORK"] = pathlib.Path(tempfile.mkdtemp(prefix="hk-spatial-test-"))
         globals()["PORT"] = 8799  # never reuse a live preview port, or the check hits another server
+        cat = _catalog()
+        assert len(cat) > 1100, f"catalogue only {len(cat)} datasets — harvest incomplete"
+        assert any(d["exportable"] for d in cat), "no exportable datasets in catalogue"
+        for q, want in [("country park", "country park"), ("廁所", "toilet"), ("電動車", "electric")]:
+            hits = json.loads(search_hk_data(q, 3))["hits"]
+            assert hits, f"{q!r} returned nothing"
+            assert want in hits[0]["title"].lower(), f"{q!r} top hit is {hits[0]['title']!r}"
+            print(f"  search {q!r} -> {hits[0]['title'][:50]}")
         hits = json.loads(search_hk_data("country park", 3))["hits"]
-        assert hits, "CSDI catalogue search returned nothing"
-        s = json.loads(load_hk_data(hits[0]["dataset_id"]))
+        s = json.loads(load_hk_data(hits[0]["dataset_id"], hits[0]["title"]))
         assert s.get("features", 0) > 0, s
         lo, la = s["bbox"][0], s["bbox"][1]
         assert 113.8 < lo < 114.5 and 22.1 < la < 22.6, f"projection drift: {s['bbox']}"

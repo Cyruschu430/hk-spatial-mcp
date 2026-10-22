@@ -56,6 +56,7 @@ terrain tiles. Everything below requires `ARCGIS_TOKEN` and mostly consumes cred
 - `arcgis_request("content/items/<id>/data")` — item JSON
 - `arcgis_request("<featureServiceUrl>/0/query", {"where": "1=1", "returnCountOnly": "true"})` — counts
 - `publish_layer(dataset_id, "My Layer")` — new hosted feature layer (costs credits/capacity)
+- `dataset_status(dataset_id, probe=True)` — is it still served, and how stale? (no id = the oldest 10)
 - Analysis = find the GP service task and `submitJob`, then poll `jobs/<jobId>`; same `arcgis_request`.
 
 If `ARCGIS_TOKEN` is missing the tool says so — tell the user to put a **user/OAuth token** in the MCP

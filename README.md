@@ -45,6 +45,7 @@ portal's data-export conventions.
 | **Catalogue search** | All 1,154 CSDI datasets, indexed locally and relevance-ranked. English, 繁體中文 and 简体中文 queries supported. |
 | **Data retrieval** | Any dataset as GeoJSON in EPSG:4326, returned as a summary (feature count, geometry types, attribute fields, bounding box) rather than a raw feature dump. |
 | **Map rendering** | One or many datasets rendered as an interactive **2D map** or **3D scene** (ArcGIS Maps SDK for JavaScript, keyless public basemap; 3D adds Terrain3D relief), served on `localhost`. |
+| **Feature inspection** | Click any feature to open an attribute card — every field from the dataset, bilingual column names where CSDI provides them, URLs rendered as links. |
 | **Geocoding and geometry** | Address ↔ coordinate (both directions), project / buffer / simplify on any GeoJSON geometry, ground elevation, via Esri's public services. No key required. |
 | **Basemaps** | 11 keyless Esri basemap styles (imagery, topographic, streets, light/dark gray, terrain, hillshade, ocean, physical, natgeo, shaded relief) plus an optional labels overlay. |
 | **Static map export** | Render a basemap PNG (no key) into the workspace for reports and decks. |
@@ -275,6 +276,11 @@ features are streamed from the served file rather than inlined into the page.
 `terrain`, `hillshade`, `ocean`, `physical`, `natgeo`, `shaded-relief`. `labels=True` adds Esri's
 boundaries-and-places reference overlay on top.
 
+**Clicking a feature** opens an attribute card in the bottom-left corner of the page: every attribute field
+of that feature, `NAME_TC` / `LOCATION_TC` shown next to the English columns, and any URL rendered as a
+link. The field labels come from the dataset itself, so nothing is hard-coded per dataset. Multi-layer maps
+work the same way — whichever layer the click hits wins.
+
 ### `build_scene(dataset_ids, title="Hong Kong Spatial Data", basemap="imagery", labels=False, tilt=60)`
 
 Same datasets as `build_map`, rendered in a **3D scene** served at `scene.html`: Terrain3D ground,
@@ -437,6 +443,15 @@ The model-facing cost is small by design: a full search → load → build_map f
 2,600 characters of JSON, so the agent does not need long reasoning to produce a map.
 
 ## Design notes
+
+- **No SDK popup.** On Maps SDK 5.0 a programmatically created `MapView` does not inject the popup UI —
+  the popup is a beta web component (`<arcgis-popup>`) and `popupEnabled` on its own opens nothing. Rather
+  than pull in a beta component, the template ships one `view.on("click")` handler and one styled card.
+  Predictable across SDK releases, and it matches the rest of the UI.
+- **Every layer is served by URL.** `GeoJSONLayer` with an inline `data` property (and with `blob`)
+  fails to load on 5.0 — `TypeError: Cannot read properties of null (reading 'type')`. All layers are
+  written to `data/<dataset>.geojson` and referenced by URL, so there is one code path and the HTML stays
+  small.
 
 - **Why a local index.** The catalogue service's `AnyText` query is high-recall but low-precision
   (a Chinese query such as 廁所 returns 185 hits with irrelevant ranking). Indexing the full catalogue

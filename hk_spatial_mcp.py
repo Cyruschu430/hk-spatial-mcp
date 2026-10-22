@@ -286,8 +286,14 @@ def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page:
         # Every layer is served from disk and referenced by URL. GeoJSONLayer with an inline `blob`
         # fails to load on SDK 5.0 ("Cannot read properties of null (reading 'type')"), and urls keep
         # the HTML small for big layers — one code path, no size threshold.
+        props = (feats[0].get("properties") or {}) if feats else {}
+        fields = [k for k in props if not k.startswith("__")][:20]
+        # a sensible popup title: prefer a name/location label, else the dataset title
+        title_field = next((k for k in fields if k.upper() in
+                            ("NAME_EN", "NAME", "NAME_TC", "TITLE", "FACILITY_NAME", "LOCATION_EN")), "")
         entry = {"id": did, "name": label.read_text(encoding="utf-8") if label.exists() else did,
-                 "url": f"data/{p.name}", "count": len(feats), "gtype": gtype}
+                 "url": f"data/{p.name}", "count": len(feats), "gtype": gtype,
+                 "fields": fields, "title_field": title_field}
         if p.stat().st_size > 60_000_000:  # honest warning, never silently sample the data
             warn.append(f"{did} is {p.stat().st_size // 1_000_000} MB / "
                         f"{len(feats)} features — the browser will be slow; "
@@ -595,6 +601,16 @@ TEMPLATE = r"""<!DOCTYPE html>
   .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
   .ct{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
   .foot{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);color:var(--dim);font-size:10px}
+  #info{position:absolute;left:14px;bottom:14px;z-index:10;width:330px;max-height:44vh;overflow:auto;
+    background:var(--glass);border:1px solid var(--line);border-radius:14px;padding:12px 14px;
+    backdrop-filter:blur(16px) saturate(150%);box-shadow:0 18px 44px rgba(0,0,0,.45)}
+  #info[hidden]{display:none}
+  #info .ih{font-weight:600;font-size:13px;color:var(--fg);margin-bottom:8px;padding-bottom:7px;
+    border-bottom:1px solid var(--line)}
+  #info .ir{display:flex;gap:10px;padding:2.5px 0}
+  #info .ik{flex:0 0 42%;color:var(--dim);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;
+    word-break:break-word}
+  #info .iv{flex:1;color:var(--fg);word-break:break-word;font-size:12px}
   .esri-ui .esri-attribution{position:absolute!important;bottom:0!important;right:0!important;
     left:auto!important;top:auto!important;background:rgba(8,11,18,.8)!important;color:var(--dim)!important;
     font-size:10px!important;border-radius:8px 0 0 0;padding:3px 8px!important}
@@ -609,6 +625,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   <div id="layers"></div>
   <div class="foot">Data: CSDI portal.csdi.gov.hk · Basemap: Esri · Powered by Esri</div>
 </div>
+<div id="info" hidden></div>
 <script type="module">
 import Map from "https://js.arcgis.com/5.0/@arcgis/core/Map.js";
 import MapView from "https://js.arcgis.com/5.0/@arcgis/core/views/MapView.js";
@@ -644,6 +661,33 @@ const view = MODE === "3d"
   : new MapView({ container: "view", map, center: HK, zoom: 11 });
 window.__view = view;  // exposed for tests/debugging
 view.when(() => { window.__readyMs = Math.round(performance.now()); }).catch(() => {});
+
+// click a feature -> attribute card (bottom left)
+const info = document.getElementById("info");
+const PRETTY = { NAME_EN: "Name (EN)", NAME_TC: "名稱（中文）", LOCATION_EN: "Location (EN)",
+                 LOCATION_TC: "位置（中文）", WEBSITE: "Website", EASTING: "Easting (HK80)",
+                 NORTHING: "Northing (HK80)" };
+view.on("click", async (event) => {
+  try {
+    const hit = (await view.hitTest(event)).results.find(r => r.graphic && r.graphic.layer);
+    if (!hit) { info.hidden = true; return; }
+    const a = hit.graphic.attributes || {};
+    const rows = Object.keys(a)
+      .filter(k => !k.startsWith("__") && a[k] !== null && a[k] !== "")
+      .slice(0, 24)
+      .map(k => {
+        const label = PRETTY[k] || k;
+        const v = /^https?:\/\//.test(String(a[k]))
+          ? `<a href="${a[k]}" target="_blank" rel="noopener" style="color:#3fe0d0">link</a>`
+          : String(a[k]);
+        return `<div class="ir"><span class="ik">${label}</span><span class="iv">${v}</span></div>`;
+      }).join("");
+    const heading = a.NAME_TC && a.NAME_EN ? `${a.NAME_EN} · ${a.NAME_TC}` : (hit.graphic.layer.title || "");
+    info.innerHTML = `<div class="ih">${heading}</div>${rows}`;
+    info.hidden = false;
+    window.__info = a;  // exposed for tests
+  } catch (e) { info.hidden = true; }
+});
 const box = document.getElementById("layers");
 
 LAYERS.forEach((L, i) => {
@@ -657,7 +701,10 @@ LAYERS.forEach((L, i) => {
       ? { type: "simple-line", color, width: 2 }
       : { type: "simple-fill", color: [...hex(color), 0.35],
           outline: { color, width: 1.2 } };
-  const opts = { title: L.name || L.id, url: L.url, popupEnabled: true, outFields: ["*"],
+  // ponytail: no SDK popup. In 5.0 the popup UI is a beta component that a programmatic View does
+  // not inject, and popupEnabled alone opens nothing. One click handler + one card is smaller,
+  // version-proof, and looks intentional.
+  const opts = { title: L.name || L.id, url: L.url, popupEnabled: false, outFields: ["*"],
                  renderer: { type: "simple", symbol } };
   // in 3D, drape lines and polygons onto the terrain instead of floating at sea level
   if (MODE === "3d" && !isPoint) opts.elevationInfo = { mode: "on-the-ground" };

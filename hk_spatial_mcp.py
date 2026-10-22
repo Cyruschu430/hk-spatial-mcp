@@ -241,8 +241,23 @@ _serve_state: dict = {}
 
 def build_map(dataset_ids, title: str = "Hong Kong Spatial Data",
               basemap: str = "imagery", labels: bool = False) -> str:
-    """Build an interactive web map (ArcGIS Maps SDK, keyless basemap) from loaded datasets and
+    """Build an interactive 2D web map (ArcGIS Maps SDK, keyless basemap) from loaded datasets and
     serve it on localhost. Open the returned URL in your client's browser or preview pane."""
+    return _build(dataset_ids, title, basemap, labels, mode="2d", page="index.html")
+
+
+def build_scene(dataset_ids, title: str = "Hong Kong Spatial Data",
+                basemap: str = "imagery", labels: bool = False,
+                tilt: float = 60) -> str:
+    """Same datasets, rendered in a 3D scene: terrain relief, tilted camera, layers draped on the
+    ground. Keyless (public imagery + Terrain3D elevation). Use it when relief, height or a
+    walk-through view matters — towers, slopes, trails, coastal context."""
+    return _build(dataset_ids, title, basemap, labels, mode="3d", page="scene.html", tilt=tilt)
+
+
+def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page: str,
+           tilt: float = 60) -> str:
+    """Shared builder for the 2D map (index.html) and the 3D scene (scene.html)."""
     if isinstance(dataset_ids, str):
         dataset_ids = [dataset_ids]
     layers, missing, warn = [], [], []
@@ -273,16 +288,21 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data",
     svc = BASEMAPS.get(str(basemap).lower())
     if not svc:
         return json.dumps({"error": f"unknown basemap {basemap!r}", "basemaps": sorted(BASEMAPS)})
-    html = TEMPLATE.replace("/*%BASEMAP_URL%*/",
-                            json.dumps(f"{TILES}/{svc}/MapServer" if svc else ""))
+    html = TEMPLATE.replace("/*%MODE%*/", json.dumps(mode))
+    html = html.replace("/*%TILT%*/", json.dumps(float(tilt)))
+    html = html.replace("/*%ELEV_URL%*/", json.dumps(f"{TERRAIN}"))
+    html = html.replace("/*%BASEMAP_URL%*/",
+                        json.dumps(f"{TILES}/{svc}/MapServer" if svc else ""))
     html = html.replace("/*%LABELS_URL%*/",
                         json.dumps(f"{TILES}/{LABELS_LAYER}/MapServer" if labels else ""))
     html = html.replace("/*%TITLE%*/", json.dumps(title, ensure_ascii=False))
     html = html.replace("/*%LAYERS%*/", json.dumps(layers, ensure_ascii=False))
     WORK.mkdir(parents=True, exist_ok=True)
-    (WORK / "index.html").write_text(html, encoding="utf-8")
+    (WORK / page).write_text(html, encoding="utf-8")
     _serve()
-    return json.dumps({"url": (f"{PUBLIC}/" if PUBLIC else f"http://localhost:{PORT}/"),
+    base = (PUBLIC + "/" if PUBLIC else f"http://localhost:{PORT}/")
+    return json.dumps({"url": base + (page if page != "index.html" else ""),
+                       "mode": mode,
                        "layers": [l["id"] for l in layers],
                        "features": sum(len(l["data"]["features"]) if "data" in l else 0 for l in layers),
                        "missing": missing, "warn": warn,
@@ -565,13 +585,15 @@ TEMPLATE = r"""<!DOCTYPE html>
 <div id="view"></div>
 <div id="panel">
   <h1 id="ttl"></h1>
-  <div class="sub">Hong Kong CSDI data · ArcGIS Maps SDK 5</div>
+  <div class="sub">Hong Kong CSDI data · ArcGIS Maps SDK 5 · <span id="mode"></span></div>
   <div id="layers"></div>
   <div class="foot">Data: CSDI portal.csdi.gov.hk · Basemap: Esri · Powered by Esri</div>
 </div>
 <script type="module">
 import Map from "https://js.arcgis.com/5.0/@arcgis/core/Map.js";
 import MapView from "https://js.arcgis.com/5.0/@arcgis/core/views/MapView.js";
+import SceneView from "https://js.arcgis.com/5.0/@arcgis/core/views/SceneView.js";
+import ElevationLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/ElevationLayer.js";
 import TileLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/TileLayer.js";
 import GeoJSONLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/GeoJSONLayer.js";
 
@@ -579,14 +601,28 @@ const LAYERS = /*%LAYERS%*/;
 const TITLE = /*%TITLE%*/;
 const BASEMAP_URL = /*%BASEMAP_URL%*/;
 const LABELS_URL = /*%LABELS_URL%*/;
+const MODE = /*%MODE%*/;
+const TILT = /*%TILT%*/;
+const ELEV_URL = /*%ELEV_URL%*/;
 const COLORS = ["#3fe0d0", "#f5a524", "#7c8cff", "#ff6b9d", "#8ce99a", "#ffd43b"];
 const hex = c => [1, 3, 5].map(i => parseInt(c.substr(i, 2), 16));
 
 document.getElementById("ttl").textContent = TITLE;
+document.getElementById("mode").textContent = MODE === "3d" ? "3D scene" : "2D map";
 const map = new Map({ basemap: null });
 if (BASEMAP_URL) map.add(new TileLayer({ url: BASEMAP_URL }));
 if (LABELS_URL) map.add(new TileLayer({ url: LABELS_URL }));
-const view = new MapView({ container: "view", map, center: [114.1694, 22.3193], zoom: 11 });
+if (MODE === "3d") map.ground = { layers: [new ElevationLayer({ url: ELEV_URL })] };
+
+const HK = [114.1694, 22.3193];
+const view = MODE === "3d"
+  ? new SceneView({
+      container: "view", map, zoom: 12,
+      camera: { position: { x: HK[0], y: HK[1], z: 2400, spatialReference: { wkid: 4326 } },
+                tilt: TILT, heading: 12 },
+    })
+  : new MapView({ container: "view", map, center: HK, zoom: 11 });
+window.__view = view;
 const box = document.getElementById("layers");
 
 LAYERS.forEach((L, i) => {
@@ -605,6 +641,8 @@ LAYERS.forEach((L, i) => {
                  popupEnabled: true, outFields: ["*"] };
   // a url-based layer has no geometry to inspect — let GeoJSONLayer auto-render it
   if (!L.url) opts.renderer = { type: "simple", symbol };
+  // in 3D, drape lines and polygons onto the terrain instead of floating at sea level
+  if (MODE === "3d" && !isPoint) opts.elevationInfo = { mode: "on-the-ground" };
   const gl = new GeoJSONLayer(opts);
   map.add(gl);
 
@@ -637,7 +675,7 @@ def main():
     except ImportError:
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
-    for fn in (search_hk_data, load_hk_data, build_map, geocode_address, geometry_op,
+    for fn in (search_hk_data, load_hk_data, build_map, build_scene, geocode_address, geometry_op,
                elevation_at, export_static_map, arcgis_request, publish_layer):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
@@ -703,6 +741,9 @@ if __name__ == "__main__":
         assert out.get("url"), out
         page = _http(out["url"]).decode()
         assert "GeoJSONLayer" in page and hits[0]["dataset_id"] in page
+        sc = json.loads(build_scene([hits[0]["dataset_id"]], "Selftest scene"))
+        assert sc.get("mode") == "3d" and sc["url"].endswith("scene.html"), sc
+        assert "SceneView" in _http(sc["url"]).decode()
         print("selftest OK:", s["features"], "features,", out["url"])
     else:
         main()

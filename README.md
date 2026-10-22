@@ -26,6 +26,7 @@ portal's data-export conventions.
 - [Configuration](#configuration)
 - [Data source and coverage](#data-source-and-coverage)
 - [Keyless Esri services](#keyless-esri-services)
+- [SDK and design system](#sdk-and-design-system)
 - [Design notes](#design-notes)
 - [FAQ](#faq)
 - [Troubleshooting](#troubleshooting)
@@ -40,7 +41,7 @@ portal's data-export conventions.
 |---|---|
 | **Catalogue search** | All 1,154 CSDI datasets, indexed locally and relevance-ranked. English, 繁體中文 and 简体中文 queries supported. |
 | **Data retrieval** | Any dataset as GeoJSON in EPSG:4326, returned as a summary (feature count, geometry types, attribute fields, bounding box) rather than a raw feature dump. |
-| **Map rendering** | One or many datasets rendered as an interactive web map (ArcGIS Maps SDK for JavaScript, keyless public basemap) served on `localhost`. |
+| **Map rendering** | One or many datasets rendered as an interactive **2D map** or **3D scene** (ArcGIS Maps SDK for JavaScript, keyless public basemap; 3D adds Terrain3D relief), served on `localhost`. |
 | **Geocoding and geometry** | Address ↔ coordinate (both directions), project / buffer / simplify on any GeoJSON geometry, ground elevation, via Esri's public services. No key required. |
 | **Basemaps** | 11 keyless Esri basemap styles (imagery, topographic, streets, light/dark gray, terrain, hillshade, ocean, physical, natgeo, shaded relief) plus an optional labels overlay. |
 | **Static map export** | Render a basemap PNG (no key) into the workspace for reports and decks. |
@@ -187,7 +188,18 @@ the first charger with geometry_op and add it to the map so the coverage ring is
 並加入地圖以顯示其覆蓋範圍。
 ```
 
-### 9. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
+### 9. Same data as a 3D scene
+
+```
+Using hk-spatial, take the country parks and slopes datasets and render them as a 3D scene with terrain
+relief, camera tilted about 60 degrees, then give me the scene URL.
+```
+```
+用 hk-spatial 將郊野公園及斜坡數據渲染成 3D 場景，開啟地形起伏、鏡頭傾斜約 60 度，
+並提供場景網址。
+```
+
+### 10. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
 
 ```
 Using hk-spatial, publish the country parks dataset to my ArcGIS Online organisation as a hosted
@@ -198,7 +210,7 @@ feature layer titled "HK Country Parks" and return the item link.
 並回報項目連結。
 ```
 
-### 10. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
+### 11. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
 
 ```
 Using hk-spatial's arcgis_request tool, list the five most recent feature layers in my ArcGIS Online
@@ -208,7 +220,7 @@ account together with their names and item IDs.
 用 hk-spatial 的 arcgis_request 工具，列出我 ArcGIS Online 帳戶中最近五個圖層服務的名稱與項目 ID。
 ```
 
-### 11. Enforce the intended workflow
+### 12. Enforce the intended workflow
 
 Load `SKILL.md` as the agent's skill or system prompt. It constrains the agent to the
 search → load → build_map sequence, prohibits fabricating data, prohibits pasting feature records into
@@ -254,6 +266,15 @@ features are streamed from the served file rather than inlined into the page.
 `basemap` accepts any keyless style: `imagery`, `topographic`, `streets`, `light-gray`, `dark-gray`,
 `terrain`, `hillshade`, `ocean`, `physical`, `natgeo`, `shaded-relief`. `labels=True` adds Esri's
 boundaries-and-places reference overlay on top.
+
+### `build_scene(dataset_ids, title="Hong Kong Spatial Data", basemap="imagery", labels=False, tilt=60)`
+
+Same datasets as `build_map`, rendered in a **3D scene** served at `scene.html`: Terrain3D ground,
+tilted camera (`tilt` degrees), lines and polygons draped on the terrain. Use it when relief, height or
+coastal context matters — slopes, trails, towers, district skyline. Keyless, same warnings as `build_map`.
+
+Both pages are plain static HTML with the same inline data pipeline, so you can keep the 2D map for
+analysis and the 3D scene for the walkthrough of the same workspace.
 
 ### `geocode_address(single_line="", max_results=5, lon=None, lat=None)`
 
@@ -359,6 +380,33 @@ tool where one exists:
 `densify`, `labelPoints` and `autoComplete` operations reject the standard parameter names this client
 sends (`empty geometry` / `must be specified` errors). They are not exposed rather than exposed broken —
 compute lengths and distances locally, which is exact enough at city scale anyway.
+
+## SDK and design system
+
+The rendering layer is deliberately thin and explicit, so it doubles as a reference implementation:
+
+| Piece | What is used | Where |
+|---|---|---|
+| Maps SDK | ArcGIS Maps SDK for JavaScript **5.0**, ESM modules from `js.arcgis.com/5.0` | the template in `hk_spatial_mcp.py` |
+| 2D / 3D views | `MapView` and `SceneView` over the same `Map` object | `build_map` vs `build_scene` |
+| Terrain | `ElevationLayer` on `map.ground` (Terrain3D, keyless) | 3D scene only |
+| Data layers | `GeoJSONLayer` with a geometry-aware renderer, streamed above 3,000 features | both |
+| Basemaps | `TileLayer` against public `arcgisonline.com` services | both |
+| UI | hand-written dark glass CSS — no component library, no build step | both pages |
+
+**Calcite (Esri's design system) is not bundled on purpose.** The template's CSS exists so the page works
+with zero dependencies and stays readable when you customise it. If you want Calcite components for a
+production app, the CDN is available and versioned:
+
+```html
+<link rel="stylesheet" href="https://js.arcgis.com/calcite-components/3.3.0/calcite.css" />
+<script type="module" src="https://js.arcgis.com/calcite-components/3.3.0/calcite.esm.js"></script>
+<calcite-block heading="Layers" open> … </calcite-block>
+```
+
+Those two URLs were confirmed reachable (200, `text/css` and JS) but are not exercised by this
+repository's tests — swap the panel markup for `calcite-shell` / `calcite-block` / `calcite-list` and
+verify visually before shipping.
 
 ## Design notes
 

@@ -16,8 +16,10 @@ CSDI is the source of truth: 1,150+ official Hong Kong datasets. The map rendere
    are metadata-only and have no GeoJSON to map.
 2. `load_hk_data(dataset_id, name="Country Parks")` → returns a summary only. Never paste features
    into the chat; the data is already on disk.
-3. `build_map([dataset_id, ...], "Title")` → returns `http://localhost:8777/`. Tell the user to open it
-   in their browser or the client's preview pane; refresh after each rebuild.
+3. `build_map([dataset_id, ...], "Title")` → 2D map at `http://localhost:8777/`. Tell the user to open
+   it in their browser or the client's preview pane; refresh after each rebuild.
+   Use `build_scene(...)` instead when relief, height or a walkthrough view matters — same data, 3D
+   terrain, tilted camera (`tilt=60`), served at `/scene.html`.
 
 ## Spatial operations (no key needed)
 

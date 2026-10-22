@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hk-spatial-mcp"
+version = "0.1.0"
+description = "MCP server: Hong Kong CSDI spatial data + ArcGIS, for AI-driven web map development"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.2"]
+
+[project.scripts]
+hk-spatial-mcp = "hk_spatial_mcp:main"
+
+[tool.setuptools]
+py-modules = ["hk_spatial_mcp"]

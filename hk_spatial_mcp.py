@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""hk-spatial-mcp — local MCP server: Hong Kong CSDI spatial data + ArcGIS.
+"""hk-spatial-mcp — an MCP server for Hong Kong CSDI spatial data.
 
-One file, stdlib + `mcp`. Run:  python3 hk_spatial_mcp.py        (stdio, for WorkBuddy/CodeBuddy)
-                               python3 hk_spatial_mcp.py --selftest
+One file, stdlib + `mcp`. Works with any MCP client over stdio.
+Run:  python3 hk_spatial_mcp.py            (stdio MCP server)
+      python3 hk_spatial_mcp.py --selftest
 Env:
   HK_MCP_DIR    workspace dir (default ./hk-spatial)
   HK_MCP_PORT   local preview port (default 8777)
@@ -45,6 +46,7 @@ def _http(url, data=None, headers=None, timeout=60):
 SYNONYMS = {
     "廁所": "洗手間 toilets", "洗手間": "toilets", "公廁": "洗手間 toilets",
     "樓宇": "building 大廈", "大廈": "building 樓宇", "建築物": "building",
+    "公立醫院": "hospital authority 醫院", "私家醫院": "private hospital 醫院",
     "行人路": "pedestrian footpath walkway 行人", "行人": "pedestrian 行人路",
     "巴士": "bus 巴士站", "港鐵": "mtr railway 鐵路", "渡輪": "ferry 碼頭",
     "學校": "school 學校", "醫院": "hospital 醫院", "診所": "clinic 診所",
@@ -94,8 +96,12 @@ def _catalog(force: bool = False) -> list:
 def _score(query: str, d: dict) -> int:
     q = query.lower().strip()
     terms = [t for t in re.split(r"\s+", q) if t]
-    terms += [w for w in (SYNONYMS.get(q) or "").split() if w] if q in SYNONYMS else \
-             [w for t in terms for w in (SYNONYMS.get(t) or "").split()]
+    # expand any HK term that appears INSIDE the query, not just an exact match
+    # (公立醫院 -> 醫院 -> hospital; 斜坡安全 -> 斜坡 -> slope)
+    for k, v in SYNONYMS.items():
+        if k in q:
+            terms += [w for w in v.split() if w]
+    terms = list(dict.fromkeys(terms))
     title = f"{d['title']} {d['title_zh']}".lower()
     kw = " ".join(d["kw"]).lower()
     abst = f"{d['abstract']} {d['abstract_zh']}".lower()
@@ -124,6 +130,12 @@ def search_hk_data(keyword: str = "", limit: int = 10, offset: int = 0) -> str:
     # shorter title breaks score ties: "Building" beats "Quality Water Supply Scheme for Buildings – …"
     ranked = sorted(((s, d) for d in cat if (s := _score(keyword, d)) > 0),
                     key=lambda kv: (-kv[0], len(kv[1]["title"]), kv[1]["title"]))
+    if not ranked:  # 斜坡安全 -> 斜坡: drop trailing CJK chars until something matches
+        for n in range(len(keyword.strip()) - 1, 1, -1):
+            ranked = sorted(((s, d) for d in cat if (s := _score(keyword.strip()[:n], d)) > 0),
+                            key=lambda kv: (-kv[0], len(kv[1]["title"]), kv[1]["title"]))
+            if ranked:
+                break
     hits = [{"dataset_id": d["id"], "title": d["title"], "title_zh": d["title_zh"],
              "org": d["org"], "updated": d["updated"], "score": s,
              "exportable": d["exportable"],
@@ -219,8 +231,8 @@ _serve_state: dict = {}
 
 
 def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
-    """Build an ArcGIS Maps SDK web map from loaded datasets and serve it on localhost.
-    Open the returned URL in WorkBuddy's Preview tab."""
+    """Build an interactive web map (ArcGIS Maps SDK, keyless basemap) from loaded datasets and
+    serve it on localhost. Open the returned URL in your client's browser or preview pane."""
     if isinstance(dataset_ids, str):
         dataset_ids = [dataset_ids]
     layers, missing, warn = [], [], []
@@ -256,7 +268,7 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
     return json.dumps({"url": f"http://localhost:{PORT}/", "layers": [l["id"] for l in layers],
                        "features": sum(len(l["data"]["features"]) if "data" in l else 0 for l in layers),
                        "missing": missing, "warn": warn,
-                       "next": "open the url in WorkBuddy's Preview tab (refresh it to see changes)"})
+                       "next": "open the url in your client's browser/preview pane (refresh to see changes)"})
 
 
 # ---------------------------------------------------------------- ArcGIS Online
@@ -266,8 +278,8 @@ def _token() -> str:
     if not t:
         raise RuntimeError(
             "ARCGIS_TOKEN not set. Set an ArcGIS Online user/OAuth token to publish or read org "
-            "content (an API key only covers basemaps/geocoding). WorkBuddy: put it in the MCP "
-            "server's env block in mcp.json.")
+            "content (an API key only covers basemaps/geocoding). Add it to this MCP server's env "
+            "block in your client's config.")
     return t
 
 
@@ -466,7 +478,8 @@ if __name__ == "__main__":
         cat = _catalog()
         assert len(cat) > 1100, f"catalogue only {len(cat)} datasets — harvest incomplete"
         assert any(d["exportable"] for d in cat), "no exportable datasets in catalogue"
-        for q, want in [("country park", "country park"), ("廁所", "toilet"), ("電動車", "electric")]:
+        for q, want in [("country park", "country park"), ("廁所", "toilet"), ("電動車", "electric"),
+                        ("斜坡安全", "slope"), ("公立醫院", "hospital")]:
             hits = json.loads(search_hk_data(q, 3))["hits"]
             assert hits, f"{q!r} returned nothing"
             assert want in hits[0]["title"].lower(), f"{q!r} top hit is {hits[0]['title']!r}"

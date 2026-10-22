@@ -19,6 +19,30 @@ CSDI is the source of truth: 1,150+ official Hong Kong datasets. The map rendere
 3. `build_map([dataset_id, ...], "Title")` → returns `http://localhost:8777/`. Tell the user to open it
    in their browser or the client's preview pane; refresh after each rebuild.
 
+## Spatial operations (no key needed)
+
+- `geocode_address("Central, Hong Kong")` → lon/lat candidates.
+- `geometry_op("project", geom, in_sr=2326, out_sr=4326)` — CSDI layers are sometimes published in
+  HK1980 Grid (2326); project before combining with WGS84 data.
+- `geometry_op("buffer", geom, distance=500)` — buffer/coverage rings returned as GeoJSON.
+- `geometry_op("simplify", geom, max_deviation=0.0001)` — large polygons before putting them on a map.
+- Do the arithmetic locally when it is simple (distance, counts). Use the service when you need real
+  projection or a proper geodesic buffer.
+
+## What needs a token, and what does not
+
+Keyless and verified: the Geometry service (project/buffer/simplify), the World Geocoder, basemap and
+terrain tiles. Everything below requires `ARCGIS_TOKEN` and mostly consumes credits — read the task's
+`?f=json` before calling it, never invent parameters:
+
+| Task | Endpoint pattern | Notes |
+|---|---|---|
+| AGOL standard analysis | `analysis.arcgis.com/arcgis/rest/services/tasks/GPServer/<Task>/submitJob` then poll `jobs/<jobId>` | credits |
+| Feature query / statistics | `<featureServiceUrl>/0/query?where=…&outStatistics=[…]` | no credits |
+| Routing | `route-api.arcgis.com/arcgis/rest/services/World/Route/NAServer/Route_World/solve` | credits |
+| GeoEnrichment (demographics) | `geoenrich.arcgis.com/arcgis/rest/services/World/geoenrichmentserver/GeoEnrichment/enrich` | credits |
+| Print / export map | `utility.arcgisonline.com/arcgis/rest/services/Utilities/PrintingTools/GPServer/Export%20Web%20Map/submitJob` | async job |
+
 ## ArcGIS Online (optional)
 
 - `arcgis_request("search", {"q": "owner:me", "num": 10})` — find items

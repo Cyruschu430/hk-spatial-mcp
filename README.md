@@ -40,6 +40,7 @@ portal's data-export conventions.
 | **Catalogue search** | All 1,154 CSDI datasets, indexed locally and relevance-ranked. English, 繁體中文 and 简体中文 queries supported. |
 | **Data retrieval** | Any dataset as GeoJSON in EPSG:4326, returned as a summary (feature count, geometry types, attribute fields, bounding box) rather than a raw feature dump. |
 | **Map rendering** | One or many datasets rendered as an interactive web map (ArcGIS Maps SDK for JavaScript, keyless public basemap) served on `localhost`. |
+| **Geocoding and geometry** | Address → coordinates, plus project / buffer / simplify on any GeoJSON geometry, via Esri's public services. No key required. |
 | **ArcGIS Online (optional)** | Publish a dataset as a hosted feature layer, or call any ArcGIS REST endpoint (item search, feature queries, geoprocessing jobs) with your own token. |
 
 The data layer is the primary value: CSDI is the source of truth. The map renderer is interchangeable,
@@ -162,7 +163,28 @@ Using hk-spatial, list every dataset related to slope safety and describe each o
 用 hk-spatial 列出所有與斜坡安全相關的數據集，並為每個數據集提供一句說明。
 ```
 
-### 7. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
+### 7. Geocode an address onto the map
+
+```
+Using hk-spatial, geocode "Hong Kong Convention and Exhibition Centre" and add it to a map as a
+single labelled point.
+```
+```
+用 hk-spatial 將「香港會議展覽中心」地理編碼，並以單一標註點加入地圖。
+```
+
+### 8. Coverage ring (buffer) around a facility
+
+```
+Using hk-spatial, load the electric vehicle chargers dataset, then produce a 500-metre buffer around
+the first charger with geometry_op and add it to the map so the coverage ring is visible.
+```
+```
+用 hk-spatial 載入電動車充電站數據，再用 geometry_op 為第一個充電站建立 500 米緩衝區，
+並加入地圖以顯示其覆蓋範圍。
+```
+
+### 9. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
 
 ```
 Using hk-spatial, publish the country parks dataset to my ArcGIS Online organisation as a hosted
@@ -173,7 +195,7 @@ feature layer titled "HK Country Parks" and return the item link.
 並回報項目連結。
 ```
 
-### 8. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
+### 10. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
 
 ```
 Using hk-spatial's arcgis_request tool, list the five most recent feature layers in my ArcGIS Online
@@ -183,7 +205,7 @@ account together with their names and item IDs.
 用 hk-spatial 的 arcgis_request 工具，列出我 ArcGIS Online 帳戶中最近五個圖層服務的名稱與項目 ID。
 ```
 
-### 9. Enforce the intended workflow
+### 11. Enforce the intended workflow
 
 Load `SKILL.md` as the agent's skill or system prompt. It constrains the agent to the
 search → load → build_map sequence, prohibits fabricating data, prohibits pasting feature records into
@@ -225,6 +247,25 @@ to the model.
 Builds an interactive map from the loaded datasets and serves it on `http://localhost:<HK_MCP_PORT>/`.
 Returns the URL, layer list, total feature count and warnings for oversized layers. Layers above 3,000
 features are streamed from the served file rather than inlined into the page.
+
+### `geocode_address(single_line: str, max_results: int = 5)`
+
+Geocodes an address or place name with Esri's public world geocoder and returns candidates with
+longitude, latitude and a match score (EPSG:4326). No key required; the endpoint is rate-limited, so use
+an ArcGIS Location Platform key for production volumes.
+
+### `geometry_op(operation, geojson, in_sr=4326, out_sr=None, distance=500, unit="meters", max_deviation=None)`
+
+Runs one geometry operation through Esri's public Geometry service and returns GeoJSON. No key required.
+
+| Operation | Use |
+|---|---|
+| `project` | Reproject a geometry, e.g. `in_sr=2326, out_sr=4326` for CSDI layers published in HK1980 Grid |
+| `buffer` | Coverage rings — `distance` in `unit` (`meters`, `kilometers`, `feet`, `miles`, `nauticalmiles`) |
+| `simplify` | Reduce vertex count on large polygons before rendering (`max_deviation` in input units) |
+
+Accepts and returns GeoJSON `Point`, `MultiPoint`, `LineString`, `MultiLineString`, `Polygon` and
+`MultiPolygon`.
 
 ### `arcgis_request(path: str, params: dict | None = None, method: str = "GET")`
 
@@ -309,13 +350,16 @@ GeoJSON is already on disk, so you can ship it to your own server, a static site
 There is no built-in analysis engine, and that is deliberate — the server's job is to get authoritative
 data out of CSDI intact. Two supported routes:
 
-1. **ArcGIS Online geoprocessing.** Locate a GP service task and drive it through `arcgis_request`:
+1. **ArcGIS public geometry operations (no key, no credits).** `geometry_op` covers projection, buffering
+   and simplification — enough for coverage rings, CSDI layers published in HK1980 Grid, and rendering
+   preparation. `geocode_address` covers address → point. Both are exercised by the self-test.
+2. **ArcGIS Online geoprocessing.** Locate a GP service task and drive it through `arcgis_request`:
    `submitJob` with the parameters, then poll `jobs/<jobId>`. This requires `ARCGIS_TOKEN`, and the
    service consumes organisation credits. The request passthrough itself is implemented and its token
    handling is tested; a live geoprocessing run has **not** been exercised in this repository's test
    suite (no test organisation credentials are bundled), so validate against your own service before
    relying on it.
-2. **Local analysis.** Every dataset is on disk as GeoJSON in EPSG:4326, so an agent can process it with
+3. **Local analysis.** Every dataset is on disk as GeoJSON in EPSG:4326, so an agent can process it with
    whatever Python stack is installed (`shapely`, `pyproj`, `geopandas`, `duckdb spatial`) and hand the
    result back through `build_map`. This keeps the analysis explainable and free of credit costs.
 

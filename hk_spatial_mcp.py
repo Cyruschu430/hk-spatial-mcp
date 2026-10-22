@@ -280,6 +280,92 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
                        "next": "open the url in your client's browser/preview pane (refresh to see changes)"})
 
 
+# ------------------------------------------------- ArcGIS public services (no key)
+
+GEOM_SRV = "https://utility.arcgisonline.com/arcgis/rest/services/Geometry/GeometryServer"
+GEOCODER = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer"
+UNITS = {"meters": 9001, "kilometers": 9036, "feet": 9002, "miles": 9093, "nauticalmiles": 9030}
+
+
+def _gj_to_esri(g: dict) -> dict:
+    t, c = g.get("type"), g.get("coordinates")
+    if t == "Point":
+        return {"geometryType": "esriGeometryPoint", "geometry": {"x": c[0], "y": c[1]}}
+    if t in ("LineString", "MultiLineString"):
+        return {"geometryType": "esriGeometryPolyline",
+                "geometry": {"paths": [c] if t == "LineString" else c}}
+    if t in ("Polygon", "MultiPolygon"):
+        return {"geometryType": "esriGeometryPolygon",
+                "geometry": {"rings": c if t == "Polygon" else [r for poly in c for r in poly]}}
+    if t == "MultiPoint":
+        return {"geometryType": "esriGeometryMultipoint", "geometry": {"points": c}}
+    raise ValueError(f"unsupported GeoJSON type {t!r}: use Point, MultiPoint, LineString, MultiLineString, Polygon or MultiPolygon")
+
+
+def _esri_to_gj(item: dict) -> dict:
+    if "x" in item:
+        return {"type": "Point", "coordinates": [item["x"], item["y"]]}
+    if "points" in item:
+        return {"type": "MultiPoint", "coordinates": item["points"]}
+    if "paths" in item:
+        return {"type": "MultiLineString", "coordinates": item["paths"]}
+    if "rings" in item:
+        return {"type": "Polygon", "coordinates": item["rings"]}
+    return {"type": "Unknown", "raw": item}
+
+
+def geocode_address(single_line: str, max_results: int = 5) -> str:
+    """Geocode an address or place name to coordinates (EPSG:4326) using Esri's public world
+    geocoder — no key required. Useful for turning a CSDI attribute (address, building name) into
+    a point, or for centring a map. For production workloads use an ArcGIS Location Platform key."""
+    params = {"f": "json", "SingleLine": single_line,
+              "maxLocations": max(1, min(int(max_results), 20)), "outSR": 4326}
+    raw = json.loads(_http(GEOCODER + "/findAddressCandidates?" + urllib.parse.urlencode(params),
+                           timeout=60))
+    cands = [{"address": c.get("address"), "lon": (c.get("location") or {}).get("x"),
+              "lat": (c.get("location") or {}).get("y"), "score": c.get("score")}
+             for c in raw.get("candidates") or []]
+    if not cands:
+        return json.dumps({"query": single_line, "candidates": [],
+                           "note": "no candidate — try a fuller address, or romanised HK place names"})
+    return json.dumps({"query": single_line, "candidates": cands,
+                       "source": "Esri World Geocoder (public endpoint, rate-limited)"},
+                      ensure_ascii=False)
+
+
+def geometry_op(operation: str, geojson, in_sr: int = 4326, out_sr: int | None = None,
+                distance: float = 500, unit: str = "meters",
+                max_deviation: float | None = None) -> str:
+    """Project, buffer or simplify one GeoJSON geometry with Esri's public Geometry service — no key.
+
+    operation: "project" (in_sr -> out_sr, e.g. 2326 -> 4326), "buffer" (distance in `unit`),
+    "simplify" (max_deviation in the input SR's units).
+    """
+    try:
+        esri = _gj_to_esri(geojson if isinstance(geojson, dict) else json.loads(geojson))
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+    out_sr = out_sr or in_sr
+    payload = json.dumps({"geometryType": esri["geometryType"], "geometries": [esri["geometry"]]})
+    if operation == "project":
+        path, params = "project", {"inSR": in_sr, "outSR": out_sr, "geometries": payload}
+    elif operation == "buffer":
+        path, params = "buffer", {"inSR": in_sr, "outSR": out_sr, "unit": UNITS.get(unit.lower(), 9001),
+                                  "distances": distance, "geometries": payload}
+    elif operation == "simplify":
+        path, params = "simplify", {"sr": in_sr, "maxDeviation": max_deviation or 0.0001,
+                                    "geometries": payload}
+    else:
+        return json.dumps({"error": f"unknown operation {operation!r}: use project, buffer or simplify"})
+    params["f"] = "json"
+    raw = json.loads(_http(f"{GEOM_SRV}/{path}?" + urllib.parse.urlencode(params), timeout=90))
+    if "error" in raw:
+        return json.dumps({"operation": operation, "error": raw["error"]})
+    out = _esri_to_gj((raw.get("geometries") or [{}])[0])
+    return json.dumps({"operation": operation, "in_sr": in_sr, "out_sr": out_sr, "geometry": out},
+                      ensure_ascii=False)
+
+
 # ---------------------------------------------------------------- ArcGIS Online
 
 def _token() -> str:
@@ -473,7 +559,8 @@ def main():
     except ImportError:
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
-    for fn in (search_hk_data, load_hk_data, build_map, arcgis_request, publish_layer):
+    for fn in (search_hk_data, load_hk_data, build_map, geocode_address, geometry_op,
+               arcgis_request, publish_layer):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":
@@ -508,6 +595,17 @@ if __name__ == "__main__":
             assert hits, f"{q!r} returned nothing"
             assert want in hits[0]["title"].lower(), f"{q!r} top hit is {hits[0]['title']!r}"
             print(f"  search {q!r} -> {hits[0]['title'][:50]}")
+        gc = json.loads(geocode_address("Central, Hong Kong", 2))["candidates"]
+        assert gc and 113.8 < gc[0]["lon"] < 114.5 and 22.1 < gc[0]["lat"] < 22.6, gc
+        print(f"  geocode -> {gc[0]['address']} ({gc[0]['lon']:.4f}, {gc[0]['lat']:.4f})")
+        pr = json.loads(geometry_op("project", {"type": "Point", "coordinates": [835000, 820000]},
+                                    in_sr=2326, out_sr=4326))["geometry"]["coordinates"]
+        assert 113.8 < pr[0] < 114.5 and 22.1 < pr[1] < 22.6, pr
+        print(f"  project 2326->4326 -> {pr[0]:.4f}, {pr[1]:.4f}")
+        buf = json.loads(geometry_op("buffer", {"type": "Point", "coordinates": [114.1694, 22.3193]},
+                                     distance=500))["geometry"]
+        assert buf["type"] == "Polygon" and len(buf["coordinates"][0]) > 10, buf["type"]
+        print(f"  buffer 500 m -> Polygon with {len(buf['coordinates'][0])} vertices")
         hits = json.loads(search_hk_data("country park", 3))["hits"]
         s = json.loads(load_hk_data(hits[0]["dataset_id"], hits[0]["title"]))
         assert s.get("features", 0) > 0, s

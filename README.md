@@ -61,6 +61,10 @@ and the ArcGIS Online tools are optional extensions that require your own creden
 ## Requirements
 
 - Python 3.10 or newer, or [`uv`](https://docs.astral.sh/uv/) (recommended — `uvx` runs the server without a manual install)
+- **No other dependencies.** Every tool function is pure standard library (`json`, `math`, `urllib`,
+  `http.server`, `threading`, `pathlib`) — verified by running them under `python3 -S`, which disables
+  site-packages entirely. `mcp` is imported inside `main()` only, so it is needed to *serve* MCP, never to
+  use the functions from your own code.
 - An MCP-capable client (Claude Desktop, Cursor, WorkBuddy / CodeBuddy, Codex, Hermes, or any stdio MCP client)
 - Network access to `portal.csdi.gov.hk`
 - *Optional:* an ArcGIS Online user or OAuth token, needed only for the publishing and content tools

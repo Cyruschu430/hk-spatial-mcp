@@ -521,8 +521,11 @@ def summarise_hk_data(dataset_id: str, group_by: str = "", value_field: str = ""
                 if k.startswith("__") or v in (None, ""):
                     continue
                 counts.setdefault(k, set()).add(str(v))
-        groupable = sorted(((k, len(s)) for k, s in counts.items() if 2 <= len(s) <= 60),
-                           key=lambda kv: kv[1])[:10]
+        # text-like fields first: grouping by a numeric column ("0", "1", …) is rarely the question
+        groupable = sorted(
+            ((k, len(s)) for k, s in counts.items()
+             if 2 <= len(s) <= 60 and not all(str(v).startswith("http") for v in counts[k])),
+            key=lambda kv: (all(_num(v) is not None for v in counts[kv[0]]), kv[1]))[:10]
         numeric = sorted({k for row in props for k, v in row.items()
                           if not k.startswith("__") and _num(v) is not None})
         return json.dumps({

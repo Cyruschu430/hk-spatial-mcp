@@ -21,7 +21,12 @@ CSDI is the source of truth: 1,150+ official Hong Kong datasets. The map rendere
 
 ## Spatial operations (no key needed)
 
-- `geocode_address("Central, Hong Kong")` → lon/lat candidates.
+- `build_map(ids, basemap="dark-gray", labels=True)` — keyless styles: imagery, topographic, streets,
+  light-gray, dark-gray, terrain, hillshade, ocean, physical, natgeo, shaded-relief.
+- `geocode_address("Central, Hong Kong")` → lon/lat candidates; `geocode_address(lon=…, lat=…)` →
+  street address (Chinese in HK).
+- `elevation_at(lon, lat)` → ground elevation in metres (terrain context for trails, slopes, views).
+- `export_static_map(bbox="minx,miny,maxx,maxy", basemap="streets")` → basemap-only PNG for reports.
 - `geometry_op("project", geom, in_sr=2326, out_sr=4326)` — CSDI layers are sometimes published in
   HK1980 Grid (2326); project before combining with WGS84 data.
 - `geometry_op("buffer", geom, distance=500)` — buffer/coverage rings returned as GeoJSON.

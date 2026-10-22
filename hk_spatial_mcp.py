@@ -17,6 +17,7 @@ Env:
   ARCGIS_URL          portal base, default https://www.arcgis.com
 """
 import json
+import math
 import os
 import pathlib
 import re
@@ -238,7 +239,8 @@ _serve_lock = threading.Lock()
 _serve_state: dict = {}
 
 
-def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
+def build_map(dataset_ids, title: str = "Hong Kong Spatial Data",
+              basemap: str = "imagery", labels: bool = False) -> str:
     """Build an interactive web map (ArcGIS Maps SDK, keyless basemap) from loaded datasets and
     serve it on localhost. Open the returned URL in your client's browser or preview pane."""
     if isinstance(dataset_ids, str):
@@ -268,7 +270,14 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
         layers.append(entry)
     if not layers:
         return json.dumps({"error": "nothing to map", "details": missing})
-    html = TEMPLATE.replace("/*%TITLE%*/", json.dumps(title, ensure_ascii=False))
+    svc = BASEMAPS.get(str(basemap).lower())
+    if not svc:
+        return json.dumps({"error": f"unknown basemap {basemap!r}", "basemaps": sorted(BASEMAPS)})
+    html = TEMPLATE.replace("/*%BASEMAP_URL%*/",
+                            json.dumps(f"{TILES}/{svc}/MapServer" if svc else ""))
+    html = html.replace("/*%LABELS_URL%*/",
+                        json.dumps(f"{TILES}/{LABELS_LAYER}/MapServer" if labels else ""))
+    html = html.replace("/*%TITLE%*/", json.dumps(title, ensure_ascii=False))
     html = html.replace("/*%LAYERS%*/", json.dumps(layers, ensure_ascii=False))
     WORK.mkdir(parents=True, exist_ok=True)
     (WORK / "index.html").write_text(html, encoding="utf-8")
@@ -284,6 +293,17 @@ def build_map(dataset_ids, title: str = "Hong Kong Spatial Data") -> str:
 
 GEOM_SRV = "https://utility.arcgisonline.com/arcgis/rest/services/Geometry/GeometryServer"
 GEOCODER = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer"
+TERRAIN = "https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer"
+TILES = "https://server.arcgisonline.com/ArcGIS/rest/services"
+# every basemap below answers without a key or token (verified 2026-10-22)
+BASEMAPS = {
+    "imagery": "World_Imagery", "topographic": "World_Topo_Map", "streets": "World_Street_Map",
+    "light-gray": "Canvas/World_Light_Gray_Base", "dark-gray": "Canvas/World_Dark_Gray_Base",
+    "terrain": "World_Terrain_Base", "hillshade": "Elevation/World_Hillshade",
+    "ocean": "Ocean/World_Ocean_Base", "physical": "World_Physical_Map",
+    "natgeo": "NatGeo_World_Map", "shaded-relief": "World_Shaded_Relief",
+}
+LABELS_LAYER = "Reference/World_Boundaries_and_Places"
 UNITS = {"meters": 9001, "kilometers": 9036, "feet": 9002, "miles": 9093, "nauticalmiles": 9030}
 
 
@@ -314,10 +334,18 @@ def _esri_to_gj(item: dict) -> dict:
     return {"type": "Unknown", "raw": item}
 
 
-def geocode_address(single_line: str, max_results: int = 5) -> str:
-    """Geocode an address or place name to coordinates (EPSG:4326) using Esri's public world
-    geocoder — no key required. Useful for turning a CSDI attribute (address, building name) into
-    a point, or for centring a map. For production workloads use an ArcGIS Location Platform key."""
+def geocode_address(single_line: str = "", max_results: int = 5,
+                    lon: float | None = None, lat: float | None = None) -> str:
+    """Geocode an address/place to coordinates, or reverse-geocode a coordinate to an address.
+    Esri public world geocoder — no key required. Reverse mode: pass `lon` and `lat`."""
+    if lon is not None and lat is not None:
+        params = {"f": "json", "location": f"{lon},{lat}", "outSR": 4326}
+        raw = json.loads(_http(GEOCODER + "/reverseGeocode?" + urllib.parse.urlencode(params), timeout=60))
+        addr = raw.get("address") or {}
+        return json.dumps({"lon": lon, "lat": lat,
+                           "address": addr.get("LongLabel") or addr.get("Match_addr"),
+                           "short": addr.get("ShortLabel"), "type": addr.get("Addr_type")},
+                          ensure_ascii=False)
     params = {"f": "json", "SingleLine": single_line,
               "maxLocations": max(1, min(int(max_results), 20)), "outSR": 4326}
     raw = json.loads(_http(GEOCODER + "/findAddressCandidates?" + urllib.parse.urlencode(params),
@@ -364,6 +392,53 @@ def geometry_op(operation: str, geojson, in_sr: int = 4326, out_sr: int | None =
     out = _esri_to_gj((raw.get("geometries") or [{}])[0])
     return json.dumps({"operation": operation, "in_sr": in_sr, "out_sr": out_sr, "geometry": out},
                       ensure_ascii=False)
+
+
+def elevation_at(lon: float, lat: float) -> str:
+    """Ground elevation in metres at a coordinate, from Esri's public Terrain3D service — no key.
+    Handy for hiking/relief context (e.g. trail comfort, slope warnings) alongside CSDI layers."""
+    params = {"f": "json", "geometry": json.dumps({"x": lon, "y": lat, "spatialReference": {"wkid": 4326}}),
+              "geometryType": "esriGeometryPoint", "sr": 4326, "returnCatalogItems": "false"}
+    raw = json.loads(_http(TERRAIN + "/identify?" + urllib.parse.urlencode(params), timeout=60))
+    if "error" in raw:
+        return json.dumps({"lon": lon, "lat": lat, "error": raw["error"]})
+    return json.dumps({"lon": lon, "lat": lat, "elevation_m": float(raw.get("value", "nan"))})
+
+
+def export_static_map(bbox: str | list | None = None, center: str | list | None = None,
+                      zoom: int = 14, basemap: str = "streets", size: str = "900,600") -> str:
+    """Render a basemap-only PNG (no key) into the workspace — for reports, decks and docs.
+    Give either `bbox` ("minx,miny,maxx,maxy" in EPSG:4326) or `center` + `zoom`.
+    NOTE: CSDI features are NOT drawn on this image; use build_map for the interactive version,
+    or an ArcGIS Online print service (needs ARCGIS_TOKEN) for data-on-basemap statics."""
+    svc = BASEMAPS.get(str(basemap).lower())
+    if not svc:
+        return json.dumps({"error": f"unknown basemap {basemap!r}", "basemaps": sorted(BASEMAPS)})
+    if bbox is None:
+        if center is None:
+            return json.dumps({"error": "give bbox or center (web-mercator bbox from center+zoom)"})
+        c = [float(v) for v in (center.split(",") if isinstance(center, str) else center)]
+        w_px, h_px = (int(v) for v in str(size).split(","))
+        # web-mercator ground resolution at this latitude, then pixels -> degrees
+        res = 156543.03392 * math.cos(math.radians(c[1])) / (2 ** int(zoom))
+        dlon = w_px * res / (111320.0 * math.cos(math.radians(c[1])))
+        dlat = h_px * res / 111320.0
+        bbox = f"{c[0] - dlon / 2},{c[1] - dlat / 2},{c[0] + dlon / 2},{c[1] + dlat / 2}"
+    bbox_s = bbox if isinstance(bbox, str) else ",".join(str(v) for v in bbox)
+    w, h = (int(v) for v in str(size).split(","))
+    params = {"bbox": bbox_s, "bboxSR": 4326, "imageSR": 4326, "size": f"{w},{h}",
+              "format": "png32", "f": "image"}
+    png = _http(f"{TILES}/{svc}/MapServer/export?" + urllib.parse.urlencode(params), timeout=120)
+    if not png.startswith(b"\x89PNG"):
+        return json.dumps({"error": "export did not return a PNG", "basemap": basemap})
+    (WORK / "exports").mkdir(parents=True, exist_ok=True)
+    out = WORK / "exports" / f"{svc.replace('/', '_')}_{int(time.time())}.png"
+    out.write_bytes(png)
+    _serve()
+    base = PUBLIC or f"http://localhost:{PORT}"
+    return json.dumps({"file": str(out), "url": f"{base}/exports/{out.name}",
+                       "bytes": len(png), "bbox": bbox_s, "basemap": basemap,
+                       "note": "basemap only — CSDI features are not drawn on this image"})
 
 
 # ---------------------------------------------------------------- ArcGIS Online
@@ -492,7 +567,7 @@ TEMPLATE = r"""<!DOCTYPE html>
   <h1 id="ttl"></h1>
   <div class="sub">Hong Kong CSDI data · ArcGIS Maps SDK 5</div>
   <div id="layers"></div>
-  <div class="foot">Data: CSDI portal.csdi.gov.hk · Basemap: Esri World Imagery · Powered by Esri</div>
+  <div class="foot">Data: CSDI portal.csdi.gov.hk · Basemap: Esri · Powered by Esri</div>
 </div>
 <script type="module">
 import Map from "https://js.arcgis.com/5.0/@arcgis/core/Map.js";
@@ -502,12 +577,15 @@ import GeoJSONLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/GeoJSONL
 
 const LAYERS = /*%LAYERS%*/;
 const TITLE = /*%TITLE%*/;
+const BASEMAP_URL = /*%BASEMAP_URL%*/;
+const LABELS_URL = /*%LABELS_URL%*/;
 const COLORS = ["#3fe0d0", "#f5a524", "#7c8cff", "#ff6b9d", "#8ce99a", "#ffd43b"];
 const hex = c => [1, 3, 5].map(i => parseInt(c.substr(i, 2), 16));
 
 document.getElementById("ttl").textContent = TITLE;
 const map = new Map({ basemap: null });
-map.add(new TileLayer({ url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer" }));
+if (BASEMAP_URL) map.add(new TileLayer({ url: BASEMAP_URL }));
+if (LABELS_URL) map.add(new TileLayer({ url: LABELS_URL }));
 const view = new MapView({ container: "view", map, center: [114.1694, 22.3193], zoom: 11 });
 const box = document.getElementById("layers");
 
@@ -560,7 +638,7 @@ def main():
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
     for fn in (search_hk_data, load_hk_data, build_map, geocode_address, geometry_op,
-               arcgis_request, publish_layer):
+               elevation_at, export_static_map, arcgis_request, publish_layer):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":
@@ -606,6 +684,16 @@ if __name__ == "__main__":
                                      distance=500))["geometry"]
         assert buf["type"] == "Polygon" and len(buf["coordinates"][0]) > 10, buf["type"]
         print(f"  buffer 500 m -> Polygon with {len(buf['coordinates'][0])} vertices")
+        rev = json.loads(geocode_address(lon=114.1694, lat=22.3193))
+        assert rev.get("address"), rev
+        print(f"  reverse geocode -> {rev['address'][:40]}")
+        el = json.loads(elevation_at(114.1716, 22.2759))["elevation_m"]
+        assert 0 < el < 1000, el
+        print(f"  elevation -> {el:.1f} m")
+        png = json.loads(export_static_map(bbox="114.10,22.25,114.25,22.35", basemap="streets",
+                                           size="600,400"))
+        assert png.get("bytes", 0) > 5000, png
+        print(f"  static map -> {png['file'].split('/')[-1]} ({png['bytes']} bytes)")
         hits = json.loads(search_hk_data("country park", 3))["hits"]
         s = json.loads(load_hk_data(hits[0]["dataset_id"], hits[0]["title"]))
         assert s.get("features", 0) > 0, s

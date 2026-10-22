@@ -25,6 +25,7 @@ portal's data-export conventions.
 - [Tool reference](#tool-reference)
 - [Configuration](#configuration)
 - [Data source and coverage](#data-source-and-coverage)
+- [Keyless Esri services](#keyless-esri-services)
 - [Design notes](#design-notes)
 - [FAQ](#faq)
 - [Troubleshooting](#troubleshooting)
@@ -40,7 +41,9 @@ portal's data-export conventions.
 | **Catalogue search** | All 1,154 CSDI datasets, indexed locally and relevance-ranked. English, 繁體中文 and 简体中文 queries supported. |
 | **Data retrieval** | Any dataset as GeoJSON in EPSG:4326, returned as a summary (feature count, geometry types, attribute fields, bounding box) rather than a raw feature dump. |
 | **Map rendering** | One or many datasets rendered as an interactive web map (ArcGIS Maps SDK for JavaScript, keyless public basemap) served on `localhost`. |
-| **Geocoding and geometry** | Address → coordinates, plus project / buffer / simplify on any GeoJSON geometry, via Esri's public services. No key required. |
+| **Geocoding and geometry** | Address ↔ coordinate (both directions), project / buffer / simplify on any GeoJSON geometry, ground elevation, via Esri's public services. No key required. |
+| **Basemaps** | 11 keyless Esri basemap styles (imagery, topographic, streets, light/dark gray, terrain, hillshade, ocean, physical, natgeo, shaded relief) plus an optional labels overlay. |
+| **Static map export** | Render a basemap PNG (no key) into the workspace for reports and decks. |
 | **ArcGIS Online (optional)** | Publish a dataset as a hosted feature layer, or call any ArcGIS REST endpoint (item search, feature queries, geoprocessing jobs) with your own token. |
 
 The data layer is the primary value: CSDI is the source of truth. The map renderer is interchangeable,
@@ -242,17 +245,34 @@ Downloads a dataset as GeoJSON (EPSG:4326) into the workspace and returns a summ
 geometry types, attribute field names, bounding box and file path. Feature records are never returned
 to the model.
 
-### `build_map(dataset_ids: list[str], title: str = "Hong Kong Spatial Data")`
+### `build_map(dataset_ids, title="Hong Kong Spatial Data", basemap="imagery", labels=False)`
 
 Builds an interactive map from the loaded datasets and serves it on `http://localhost:<HK_MCP_PORT>/`.
 Returns the URL, layer list, total feature count and warnings for oversized layers. Layers above 3,000
 features are streamed from the served file rather than inlined into the page.
 
-### `geocode_address(single_line: str, max_results: int = 5)`
+`basemap` accepts any keyless style: `imagery`, `topographic`, `streets`, `light-gray`, `dark-gray`,
+`terrain`, `hillshade`, `ocean`, `physical`, `natgeo`, `shaded-relief`. `labels=True` adds Esri's
+boundaries-and-places reference overlay on top.
 
-Geocodes an address or place name with Esri's public world geocoder and returns candidates with
-longitude, latitude and a match score (EPSG:4326). No key required; the endpoint is rate-limited, so use
-an ArcGIS Location Platform key for production volumes.
+### `geocode_address(single_line="", max_results=5, lon=None, lat=None)`
+
+Geocodes an address or place name and returns candidates with longitude, latitude and a match score
+(EPSG:4326). Pass `lon` and `lat` instead to **reverse geocode** a coordinate into a street address — in
+Hong Kong it returns Chinese addresses. No key required; the endpoint is rate-limited, so use an ArcGIS
+Location Platform key for production volumes.
+
+### `elevation_at(lon: float, lat: float)`
+
+Ground elevation in metres from Esri's public Terrain3D service. No key required.
+
+### `export_static_map(bbox=None, center=None, zoom=14, basemap="streets", size="900,600")`
+
+Renders a basemap PNG into `<workspace>/exports/` and returns the file path and a served URL. Give either
+`bbox` (`minx,miny,maxx,maxy` in EPSG:4326) or `center` + `zoom`. No key required.
+
+The image contains the **basemap only** — CSDI features are not drawn on it. For data-on-basemap statics,
+render the interactive map and screenshot it, or use an ArcGIS Online print service (needs a token).
 
 ### `geometry_op(operation, geojson, in_sr=4326, out_sr=None, distance=500, unit="meters", max_deviation=None)`
 
@@ -317,6 +337,28 @@ organisation content.
   review the individual dataset's licence before redistribution or commercial use.
 
 ---
+
+## Keyless Esri services
+
+Everything in this table answered without a key or token when verified on 2026-10-22, and is wired into a
+tool where one exists:
+
+| Service | Use | Tool |
+|---|---|---|
+| `server.arcgisonline.com/.../<Basemap>/MapServer` | 11 basemap styles + boundaries/labels overlay | `build_map(basemap=…)` |
+| `<Basemap>/MapServer/export` | server-side basemap PNG | `export_static_map()` |
+| `utility.arcgisonline.com/.../Geometry/GeometryServer` | `project`, `buffer`, `simplify`, `convexHull`, `findTransformations` | `geometry_op()` |
+| `geocode.arcgis.com/.../World/GeocodeServer` | `findAddressCandidates`, `reverseGeocode` | `geocode_address()` |
+| `elevation3d.arcgis.com/.../Terrain3D/ImageServer` | `identify` → ground elevation | `elevation_at()` |
+| Public Living Atlas feature services | read-only reference layers (e.g. `World_Countries`) | `arcgis_request()` / layer URL |
+
+**Needs `ARCGIS_TOKEN`, and usually credits:** AGOL standard analysis (`analysis.arcgis.com`), routing
+(`route-api.arcgis.com`), GeoEnrichment, print services, and any content in your own organisation.
+
+**Tested and deliberately not wrapped:** the Geometry service's `lengths`, `areasAndLengths`, `distance`,
+`densify`, `labelPoints` and `autoComplete` operations reject the standard parameter names this client
+sends (`empty geometry` / `must be specified` errors). They are not exposed rather than exposed broken —
+compute lengths and distances locally, which is exact enough at city scale anyway.
 
 ## Design notes
 

@@ -47,7 +47,8 @@ portal's data-export conventions.
 | **Data retrieval** | Any dataset as GeoJSON in EPSG:4326, returned as a summary (feature count, geometry types, attribute fields, bounding box) rather than a raw feature dump. |
 | **Map rendering** | One or many datasets rendered as an interactive **2D map** or **3D scene** (ArcGIS Maps SDK for JavaScript, keyless public basemap; 3D adds Terrain3D relief), served on `localhost`. |
 | **Feature inspection** | Click any feature to open an attribute card — every field from the dataset, bilingual column names where CSDI provides them, URLs rendered as links. |
-| **Answers, not just maps** | `summarise_hk_data` answers a question in text — counts, sums or averages grouped by any field — and renders a bar chart page. |
+| **Answers, not just maps** | `summarise_hk_data` answers a question in text — counts, sums or averages grouped by any field — and renders a bar chart page. `query_hk_data` returns a few individual rows so a single value can be checked. |
+| **Printable static map** | `export_static_svg` writes a vector map **with the data drawn** — basemap tiles plus the features as real shapes — ready to print to PDF from a browser. |
 | **Geocoding and geometry** | Address ↔ coordinate (both directions), project / buffer / simplify on any GeoJSON geometry, ground elevation, via Esri's public services. No key required. |
 | **Basemaps** | 11 keyless Esri basemap styles (imagery, topographic, streets, light/dark gray, terrain, hillshade, ocean, physical, natgeo, shaded relief) plus an optional labels overlay. |
 | **Static map export** | Render a basemap PNG (no key) into the workspace for reports and decks. |
@@ -213,7 +214,17 @@ district, with a bar chart.
 用 hk-spatial 搵電動車充電站數據，話我知每區有幾多個公眾充電站，並出一張棒形圖。
 ```
 
-### 10. Same data as a 3D scene
+### 10. Check one value, then print a static map
+
+```
+Using hk-spatial, query the reservoir dataset for the row whose name matches 大潭, then export a printable
+static map of the reservoirs that I can open and print to PDF.
+```
+```
+用 hk-spatial 喺水塘數據查「大潭」嗰一筆記錄，然後輸出一張可直接列印做 PDF 嘅靜態地圖。
+```
+
+### 11. Same data as a 3D scene
 
 ```
 Using hk-spatial, take the country parks and slopes datasets and render them as a 3D scene with terrain
@@ -224,7 +235,7 @@ relief, camera tilted about 60 degrees, then give me the scene URL.
 並提供場景網址。
 ```
 
-### 11. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
+### 12. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
 
 ```
 Using hk-spatial, publish the country parks dataset to my ArcGIS Online organisation as a hosted
@@ -235,7 +246,7 @@ feature layer titled "HK Country Parks" and return the item link.
 並回報項目連結。
 ```
 
-### 12. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
+### 13. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
 
 ```
 Using hk-spatial's arcgis_request tool, list the five most recent feature layers in my ArcGIS Online
@@ -245,7 +256,7 @@ account together with their names and item IDs.
 用 hk-spatial 的 arcgis_request 工具，列出我 ArcGIS Online 帳戶中最近五個圖層服務的名稱與項目 ID。
 ```
 
-### 13. Enforce the intended workflow
+### 14. Enforce the intended workflow
 
 Load `SKILL.md` as the agent's skill or system prompt. It constrains the agent to the
 search → load → build_map sequence, prohibits fabricating data, prohibits pasting feature records into
@@ -303,6 +314,13 @@ Sha Tin                                874
 ...
 ```
 
+### `query_hk_data(dataset_id, where="", fields="", limit=5)`
+
+Returns a few individual features so one value can be verified without opening the GeoJSON file. `where`
+is either `FIELD=value` (case-insensitive match on that field) or bare text searched across all fields.
+Rows are hard-capped at 20 and each row carries its `_geometry` type and first vertex — this tool exists to
+check a number, not to dump a dataset.
+
 ### `build_map(dataset_ids, title="Hong Kong Spatial Data", basemap="imagery", labels=False)`
 
 Builds an interactive map from the loaded datasets and serves it on `http://localhost:<HK_MCP_PORT>/`.
@@ -324,8 +342,13 @@ Same datasets as `build_map`, rendered in a **3D scene** served at `scene.html`:
 tilted camera (`tilt` degrees), lines and polygons draped on the terrain. Use it when relief, height or
 coastal context matters — slopes, trails, towers, district skyline. Keyless, same warnings as `build_map`.
 
-Both pages are plain static HTML with the same inline data pipeline, so you can keep the 2D map for
-analysis and the 3D scene for the walkthrough of the same workspace.
+Both pages are plain static HTML over the same served GeoJSON, so you can keep the 2D map for analysis and
+the 3D scene for the walkthrough of the same workspace.
+
+Every build also writes a **build-specific page** (`2d-<title>-<hash>.html`, `3d-…`, `chart-…`) and returns
+its URL, so building a new map never destroys an earlier one. The conventional names (`index.html`,
+`scene.html`, `chart.html`) are refreshed to the newest build for convenience; `latest_url` in the response
+points at them.
 
 ### `geocode_address(single_line="", max_results=5, lon=None, lat=None)`
 
@@ -343,8 +366,17 @@ Ground elevation in metres from Esri's public Terrain3D service. No key required
 Renders a basemap PNG into `<workspace>/exports/` and returns the file path and a served URL. Give either
 `bbox` (`minx,miny,maxx,maxy` in EPSG:4326) or `center` + `zoom`. No key required.
 
-The image contains the **basemap only** — CSDI features are not drawn on it. For data-on-basemap statics,
-render the interactive map and screenshot it, or use an ArcGIS Online print service (needs a token).
+The image contains the **basemap only** — CSDI features are not drawn on it. For a static map that *does*
+include the data, use `export_static_svg` below.
+
+### `export_static_svg(dataset_ids, title="Hong Kong", basemap="streets", max_px=1400)`
+
+Writes a printable static map **with the data drawn**: basemap tiles referenced by URL plus every feature as
+a real vector shape (points, polylines, polygons), a legend box with per-layer colours and counts, and the
+attribution line. Output is one self-contained `.svg`; open it in a browser and print to PDF for a report.
+
+The zoom is chosen automatically so the whole extent fits within `max_px`. No key, no headless browser and no
+image library are involved — it is string assembly over the same local GeoJSON the other tools use.
 
 ### `geometry_op(operation, geojson, in_sr=4326, out_sr=None, distance=500, unit="meters", max_deviation=None)`
 

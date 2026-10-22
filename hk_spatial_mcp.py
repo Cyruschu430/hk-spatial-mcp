@@ -16,6 +16,7 @@ Env:
   ARCGIS_TOKEN        ArcGIS Online user/OAuth token (only needed for org content: publish/retrieve)
   ARCGIS_URL          portal base, default https://www.arcgis.com
 """
+import hashlib
 import json
 import math
 import os
@@ -265,6 +266,13 @@ def build_scene(dataset_ids, title: str = "Hong Kong Spatial Data",
     return _build(dataset_ids, title, basemap, labels, mode="3d", page="scene.html", tilt=tilt)
 
 
+def _slug(title: str, ids) -> str:
+    """Filesystem-safe, build-specific page name so two maps can coexist."""
+    base = re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-")
+    base = re.sub(r"-{2,}", "-", base)[:40].strip("-") or "map"
+    return base + "-" + hashlib.sha1(("|".join(map(str, ids)) + str(title)).encode()).hexdigest()[:6]
+
+
 def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page: str,
            tilt: float = 60) -> str:
     """Shared builder for the 2D map (index.html) and the 3D scene (scene.html)."""
@@ -314,10 +322,15 @@ def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page:
     html = html.replace("/*%TITLE%*/", json.dumps(title, ensure_ascii=False))
     html = html.replace("/*%LAYERS%*/", json.dumps(layers, ensure_ascii=False))
     WORK.mkdir(parents=True, exist_ok=True)
+    # A build must never destroy an earlier map: keep a stable per-build page, and refresh the
+    # conventional name so old links (and the newest build) still land somewhere sensible.
+    slug_page = f"{mode}-{_slug(title, [l['id'] for l in layers])}.html"
+    (WORK / slug_page).write_text(html, encoding="utf-8")
     (WORK / page).write_text(html, encoding="utf-8")
     _serve()
     base = (PUBLIC + "/" if PUBLIC else f"http://localhost:{PORT}/")
-    return json.dumps({"url": base + (page if page != "index.html" else ""),
+    return json.dumps({"url": base + slug_page,
+                       "latest_url": base + (page if page != "index.html" else ""),
                        "mode": mode,
                        "layers": [l["id"] for l in layers],
                        "features": sum(l.get("count", 0) for l in layers),
@@ -389,6 +402,13 @@ def geocode_address(single_line: str = "", max_results: int = 5,
     cands = [{"address": c.get("address"), "lon": (c.get("location") or {}).get("x"),
               "lat": (c.get("location") or {}).get("y"), "score": c.get("score")}
              for c in raw.get("candidates") or []]
+    seen, unique = set(), []
+    for c in cands:  # the same place comes back twice with slightly different labels
+        key = (round(c["lon"] or 0, 5), round(c["lat"] or 0, 5), c["score"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+    cands = unique
     if not cands:
         return json.dumps({"query": single_line, "candidates": [],
                            "note": "no candidate — try a fuller address, or romanised HK place names"})
@@ -441,6 +461,113 @@ def elevation_at(lon: float, lat: float) -> str:
     return json.dumps({"lon": lon, "lat": lat, "elevation_m": float(raw.get("value", "nan"))})
 
 
+
+def _merc(lon: float, lat: float, z: int):
+    """Web-mercator pixel coordinates at zoom z (256 px tiles)."""
+    scale = 256 * (2 ** z)
+    x = (lon + 180.0) / 360.0 * scale
+    s = math.sin(math.radians(max(min(lat, 85.05), -85.05)))
+    y = (0.5 - math.log((1 + s) / (1 - s)) / (4 * math.pi)) * scale
+    return x, y
+
+
+def export_static_svg(dataset_ids, title: str = "Hong Kong", basemap: str = "streets",
+                      max_px: int = 1400) -> str:
+    """Write a printable static map WITH the data drawn, as one self-contained SVG page.
+
+    Basemap tiles are referenced by URL (they load in any browser with internet), features are drawn as
+    real vector shapes on top — so the result prints cleanly to PDF from the browser's print dialog.
+    No key, no headless browser, no image library.
+    """
+    svc = BASEMAPS.get(str(basemap).lower())
+    if not svc:
+        return json.dumps({"error": f"unknown basemap {basemap!r}", "basemaps": sorted(BASEMAPS)})
+    if isinstance(dataset_ids, str):
+        dataset_ids = [dataset_ids]
+    layers = []
+    for did in dataset_ids:
+        feats, err = _cached_features(did)
+        if err or not feats:
+            continue
+        pts = [p for f in feats for p in _coords(f.get("geometry") or {})]
+        if pts:
+            namefile = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', did)}.name"
+            label = namefile.read_text(encoding="utf-8") if namefile.exists() else did
+            layers.append({"id": did, "name": label, "features": feats, "pts": pts})
+    if not layers:
+        return json.dumps({"error": "nothing to draw", "datasets": dataset_ids})
+    lons = [p[0] for l in layers for p in l["pts"]]
+    lats = [p[1] for l in layers for p in l["pts"]]
+    pad = 0.02
+    w, s_, e, n = min(lons) - pad, min(lats) - pad, max(lons) + pad, max(lats) + pad
+    z = 16
+    while z > 4:  # biggest zoom whose pixel span still fits the requested image size
+        x0, y1 = _merc(w, s_, z)
+        x1, y0 = _merc(e, n, z)
+        if max(x1 - x0, y1 - y0) <= max_px:
+            break
+        z -= 1
+    x0, y1 = _merc(w, s_, z)
+    x1, y0 = _merc(e, n, z)
+    W, H = int(x1 - x0), int(y1 - y0)
+    tiles = []
+    for tx in range(int(x0 // 256), int(x1 // 256) + 1):
+        for ty in range(int(y0 // 256), int(y1 // 256) + 1):
+            tiles.append(f'<image x="{tx * 256 - x0:.0f}" y="{ty * 256 - y0:.0f}" width="256" '
+                         f'height="256" href="{TILES}/{svc}/MapServer/tile/{z}/{ty}/{tx}"/>')
+    colours = ["#00e5c0", "#ffb020", "#7c8cff", "#ff6b9d", "#8ce99a", "#ffd43b"]
+    shapes = []
+    for i, layer in enumerate(layers):
+        col = colours[i % len(colours)]
+        for f in layer["features"]:
+            g = f.get("geometry") or {}
+            t, c = g.get("type"), g.get("coordinates")
+            if not c:
+                continue
+            if t == "Point":
+                px, py = _merc(c[0], c[1], z)
+                shapes.append(f'<circle cx="{px - x0:.1f}" cy="{py - y0:.1f}" r="4.5" fill="{col}" '
+                              f'stroke="#08121a" stroke-width="1"/>')
+            elif t in ("LineString", "MultiLineString"):
+                for path in ([c] if t == "LineString" else c):
+                    pts = " ".join(f"{_merc(a, b, z)[0] - x0:.1f},{_merc(a, b, z)[1] - y0:.1f}"
+                                   for a, b in path)
+                    shapes.append(f'<polyline points="{pts}" fill="none" stroke="{col}" '
+                                  f'stroke-width="2" stroke-opacity=".9"/>')
+            elif t in ("Polygon", "MultiPolygon"):
+                for poly in ([c] if t == "Polygon" else c):
+                    for ring in poly:
+                        pts = " ".join(f"{_merc(a, b, z)[0] - x0:.1f},{_merc(a, b, z)[1] - y0:.1f}"
+                                       for a, b in ring)
+                        shapes.append(f'<polygon points="{pts}" fill="{col}" fill-opacity=".22" '
+                                      f'stroke="{col}" stroke-width="1.2"/>')
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
+           f'viewBox="0 0 {W} {H}">'
+           + "".join(tiles) + "".join(shapes)
+           + f'<g font-family="Helvetica,Arial,sans-serif"><rect x="14" y="14" rx="8" width="330" '
+             f'height="{24 + 20 * len(layers)}" fill="#0b1018" fill-opacity=".82"/>'
+           + f'<text x="26" y="36" fill="#eaf0f7" font-size="14" font-weight="bold">'
+             f'{_esc(title)[:46]}</text>'
+           + "".join(
+               f'<rect x="26" y="{52 + 20 * i}" width="10" height="10" rx="2" '
+               f'fill="{colours[i % len(colours)]}"/>'
+               f'<text x="42" y="{61 + 20 * i}" fill="#cfe0f0" font-size="11">'
+               f'{_esc(layer["name"])[:34]} · {len(layer["features"])} features</text>'
+               for i, layer in enumerate(layers))
+           + f'<text x="26" y="{40 + 20 * len(layers) + 4}" fill="#7f93a8" font-size="9">'
+             f'Data: CSDI portal.csdi.gov.hk · Basemap: Esri · Powered by Esri</text></g></svg>')
+    (WORK / "exports").mkdir(parents=True, exist_ok=True)
+    name = f"static-{_slug(title, [l['id'] for l in layers])}.svg"
+    (WORK / "exports" / name).write_text(svg, encoding="utf-8")
+    _serve()
+    base = (PUBLIC + "/exports/") if PUBLIC else f"http://localhost:{PORT}/exports/"
+    return json.dumps({"file": str(WORK / "exports" / name), "url": base + name,
+                       "features": sum(len(l["features"]) for l in layers), "zoom": z,
+                       "size_px": [W, H], "layers": [l["id"] for l in layers],
+                       "note": "vector SVG: open it and print to PDF for a report; basemap tiles load from "
+                               "the internet when the page is opened"}, ensure_ascii=False)
+
+
 def export_static_map(bbox: str | list | None = None, center: str | list | None = None,
                       zoom: int = 14, basemap: str = "streets", size: str = "900,600") -> str:
     """Render a basemap-only PNG (no key) into the workspace — for reports, decks and docs.
@@ -476,6 +603,52 @@ def export_static_map(bbox: str | list | None = None, center: str | list | None 
                        "bytes": len(png), "bbox": bbox_s, "basemap": basemap,
                        "note": "basemap only — CSDI features are not drawn on this image"})
 
+
+
+def query_hk_data(dataset_id: str, where: str = "", fields: str = "", limit: int = 5) -> str:
+    """Read a FEW individual features, so a single value can be verified without opening the GeoJSON.
+
+    `where` is either `FIELD=value` (case-insensitive match on one field) or bare text searched across all
+    fields. Rows are capped at 20 — this tool exists to check a value, not to dump a dataset; use
+    `summarise_hk_data` for aggregates and `build_map` to see the layer.
+    """
+    feats, err = _cached_features(dataset_id)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+    if not feats:
+        return json.dumps({"error": f"{dataset_id}: no features"})
+    cap = max(1, min(int(limit), 20))
+    field_list = [k for k in ((feats[0].get("properties") or {})) if not k.startswith("__")]
+    cond = (where or "").strip()
+    field_name, needle = "", cond.lower()
+    if "=" in cond:
+        field_name, _, needle = [s.strip() for s in cond.partition("=")]
+        if field_name not in field_list:
+            return json.dumps({"error": f"{dataset_id}: no field {field_name!r}", "fields": field_list[:25]},
+                              ensure_ascii=False)
+        needle = needle.lower()
+
+    def matches(row):
+        if field_name:
+            return needle in str(row.get(field_name) or "").lower()
+        return any(needle in str(v).lower() for v in row.values() if v is not None)
+
+    rows = [f for f in feats if matches(f.get("properties") or {})]
+    keep = [s.strip() for s in fields.split(",") if s.strip()] or field_list[:12]
+    out = []
+    for f in rows[:cap]:
+        props = {k: v for k, v in (f.get("properties") or {}).items() if k in keep and not k.startswith("__")}
+        geom = f.get("geometry") or {}
+        c = geom.get("coordinates")
+        while isinstance(c, list) and c and isinstance(c[0], list):  # first vertex, any geometry type
+            c = c[0]
+        props["_geometry"] = geom.get("type")
+        props["_first_vertex"] = c if isinstance(c, list) else None
+        out.append(props)
+    return json.dumps({"dataset_id": dataset_id, "where": where or "(all)", "matched": len(rows),
+                       "returned": len(out), "capped_at": cap, "rows": out,
+                       "note": "values are raw as published by CSDI; no unit metadata in the GeoJSON"},
+                      ensure_ascii=False)
 
 
 # ---------------------------------------------------------------- answers in text + charts
@@ -550,16 +723,19 @@ def summarise_hk_data(dataset_id: str, group_by: str = "", value_field: str = ""
     mode = agg if agg in ("count", "sum", "avg") else ("sum" if value_field else "count")
     rows = []
     for key, (n, total) in buckets.items():
+        if mode == "count":   # one number per row: count and value were the same thing
+            rows.append({"group": key, "count": n})
+            continue
         rows.append({"group": key, "count": n,
-                     "value": round(total if mode == "sum" else (total / n if n else 0), 2)
-                     if mode != "count" else n})
-    rows.sort(key=lambda r: -r["value"])
+                     "value": round(total if mode == "sum" else (total / n if n else 0), 2)})
+    rows.sort(key=lambda r: -(r.get("value") if mode != "count" else r["count"]))
     rows = rows[:max(1, int(top))]
     label = {"count": "features", "sum": f"sum of {value_field}", "avg": f"avg of {value_field}"}[mode]
     w = min(28, max([len(r["group"]) for r in rows] + [len("group")]))
     table = [f"{'group':<{w}}  {label:>18}", "-" * (w + 20)]
     for r in rows:
-        table.append(f"{r['group'][:w]:<{w}}  {r['value']:>18,.2f}".replace(".00", ""))
+        v = r["count"] if mode == "count" else r["value"]
+        table.append(f"{r['group'][:w]:<{w}}  {v:>18,.2f}".replace(".00", ""))
     chart_url = _chart_page(f"{dataset_id} — {label} by {group_by}", rows, w)
     return json.dumps({"dataset_id": dataset_id, "group_by": group_by, "aggregation": label,
                        "groups": len(buckets), "rows": rows, "table": "\n".join(table),
@@ -572,20 +748,21 @@ def _chart_page(title: str, rows, width_chars: int) -> str:
     client needs more than one chart type."""
     W, row_h, pad, left = 860, 30, 24, 300
     h = pad * 2 + row_h * len(rows) + 40
-    top = max((r["value"] for r in rows), default=1) or 1
+    top = max((r.get("value", r.get("count", 0)) for r in rows), default=1) or 1
     colours = ["#3fe0d0", "#f5a524", "#7c8cff", "#ff6b9d", "#8ce99a", "#ffd43b", "#6ee7f9"]
     bars = []
     for i, r in enumerate(rows):
         y = pad + 40 + i * row_h
         # leave room for the value label, otherwise the longest bar pushes it off the canvas
-        bw = max(2, int((W - left - pad - 90) * (r["value"] / top)))
+        val = r.get("value", r.get("count", 0))
+        bw = max(2, int((W - left - pad - 90) * (val / top)))
         bars.append(
             f'<text x="{left - 10}" y="{y + 15}" text-anchor="end" fill="#c9d5e3" '
             f'font-size="12">{_esc(str(r["group"])[:34])}</text>'
             f'<rect x="{left}" y="{y + 3}" width="{bw}" height="{row_h - 10}" rx="4" '
             f'fill="{colours[i % len(colours)]}" opacity=".85"/>'
             f'<text x="{left + bw + 8}" y="{y + 15}" fill="#8fa3ba" font-size="11">'
-            f'{r["value"]:,.0f}</text>')
+            f'{val:,.0f}</text>')
     svg = (f'<svg viewBox="0 0 {W} {h}" width="100%" style="max-width:{W}px" '
            f'xmlns="http://www.w3.org/2000/svg">'
            f'<text x="{pad}" y="{pad + 14}" fill="#eaf0f7" font-size="15" font-weight="600">'
@@ -597,9 +774,11 @@ def _chart_page(title: str, rows, width_chars: int) -> str:
             f"<div style='padding:22px'>{svg}"
             "<p style='color:#5f7185;font-size:11px'>Data: CSDI portal.csdi.gov.hk · "
             "Powered by Esri</p></div>")
+    name = f"chart-{_slug(title, [len(rows)])}.html"
+    (WORK / name).write_text(html, encoding="utf-8")
     (WORK / "chart.html").write_text(html, encoding="utf-8")
     _serve()
-    return (PUBLIC + "/chart.html") if PUBLIC else f"http://localhost:{PORT}/chart.html"
+    return (PUBLIC + f"/{name}") if PUBLIC else f"http://localhost:{PORT}/{name}"
 
 
 def _esc(s: str) -> str:
@@ -710,6 +889,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>HK Spatial — ArcGIS</title>
+<link rel="icon" href="data:," />
 <style>
   :root{--bg:#080b12;--glass:rgba(14,20,32,.72);--line:rgba(120,160,220,.18);--fg:#e6eefc;--dim:#8fa3c0;--teal:#3fe0d0}
   *{box-sizing:border-box}
@@ -774,7 +954,8 @@ const COLORS = ["#3fe0d0", "#f5a524", "#7c8cff", "#ff6b9d", "#8ce99a", "#ffd43b"
 const hex = c => [1, 3, 5].map(i => parseInt(c.substr(i, 2), 16));
 
 document.getElementById("ttl").textContent = TITLE;
-document.getElementById("mode").textContent = MODE === "3d" ? "3D scene" : "2D map";
+document.getElementById("mode").textContent =
+  (MODE === "3d" ? "3D scene" : "2D map") + " · " + LAYERS.length + " layer" + (LAYERS.length > 1 ? "s" : "");
 const map = new Map({ basemap: null });
 if (BASEMAP_URL) map.add(new TileLayer({ url: BASEMAP_URL }));
 if (LABELS_URL) map.add(new TileLayer({ url: LABELS_URL }));
@@ -869,9 +1050,9 @@ def main():
     except ImportError:
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
-    for fn in (search_hk_data, load_hk_data, summarise_hk_data, build_map, build_scene,
-               geocode_address, geometry_op, elevation_at, export_static_map, arcgis_request,
-               publish_layer):
+    for fn in (search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
+               geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
+               arcgis_request, publish_layer):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":
@@ -927,10 +1108,20 @@ if __name__ == "__main__":
                                            size="600,400"))
         assert png.get("bytes", 0) > 5000, png
         print(f"  static map -> {png['file'].split('/')[-1]} ({png['bytes']} bytes)")
+        svg = json.loads(export_static_svg(["afcd_rcd_1728896853370_57183"], "Selftest static",
+                                          "topographic"))
+        page = _http(svg["url"]).decode()
+        assert page.count("<image") >= 4 and page.count("<circle") == 53, (page.count("<image"),
+                                                                           page.count("<circle"))
+        print(f"  static svg  -> {svg['zoom']}z, {page.count('<image')} tiles, "
+              f"{page.count('<circle')} features drawn")
+        q = json.loads(query_hk_data("afcd_rcd_1635129924112_81508", "NAME_EN=Country", "", 3))
+        assert q["matched"] >= 1 and q["returned"] <= 3, q
+        print(f"  query       -> {q['matched']} matched, {q['returned']} returned, capped at {q['capped_at']}")
         agg = json.loads(summarise_hk_data("epd_rcd_1631080339740_69941",
                                            "NAME_OF_DISTRICT_COUNCIL_DISTRICT_EN", "", "count", 50))
         assert sum(r["count"] for r in agg["rows"]) == 989, agg["rows"]
-        assert "chart.html" in agg["chart_url"], agg["chart_url"]
+        assert "chart-" in agg["chart_url"], agg["chart_url"]
         assert "<svg" in _http(agg["chart_url"]).decode(), "chart page not served"
         print(f"  summarise   -> {len(agg['rows'])} groups, {agg['rows'][0]['count']} max, chart served")
         hits = json.loads(search_hk_data("country park", 3))["hits"]
@@ -943,8 +1134,15 @@ if __name__ == "__main__":
         page = _http(out["url"]).decode()
         assert "GeoJSONLayer" in page and hits[0]["dataset_id"] in page
         sc = json.loads(build_scene([hits[0]["dataset_id"]], "Selftest scene"))
-        assert sc.get("mode") == "3d" and sc["url"].endswith("scene.html"), sc
+        assert sc.get("mode") == "3d" and sc["url"].endswith(".html"), sc
+        assert sc["latest_url"].endswith("scene.html"), sc
         assert "SceneView" in _http(sc["url"]).decode()
+        # two builds must coexist: an earlier map must not be destroyed by a later one
+        a = json.loads(build_map([hits[0]["dataset_id"]], "Selftest alpha"))["url"]
+        b = json.loads(build_map([hits[0]["dataset_id"]], "Selftest beta"))["url"]
+        assert a != b, (a, b)
+        assert b"Selftest alpha" in _http(a) and b"Selftest beta" in _http(b)
+        print(f"  stable maps -> {a.rsplit('/', 1)[-1]} + {b.rsplit('/', 1)[-1]} both alive")
         print("selftest OK:", s["features"], "features,", out["url"])
     else:
         main()

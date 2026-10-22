@@ -26,6 +26,7 @@ portal's data-export conventions.
 - [Configuration](#configuration)
 - [Data source and coverage](#data-source-and-coverage)
 - [Keyless Esri services](#keyless-esri-services)
+- [Performance](#performance)
 - [SDK and design system](#sdk-and-design-system)
 - [Design notes](#design-notes)
 - [FAQ](#faq)
@@ -407,6 +408,26 @@ production app, the CDN is available and versioned:
 Those two URLs were confirmed reachable (200, `text/css` and JS) but are not exercised by this
 repository's tests — swap the panel markup for `calcite-shell` / `calcite-block` / `calcite-list` and
 verify visually before shipping.
+
+## Performance
+
+Measured on a 2 vCPU / 3.5 GB VPS with a warm catalogue cache:
+
+| Step | Time |
+|---|---|
+| `search_hk_data` (local index) | 10–20 ms |
+| `load_hk_data`, first download (small dataset) | 0.3 s |
+| `load_hk_data`, first download (87,946 features / 30 MB) | 14 s |
+| `load_hk_data`, cache hit (same layer) | 0.3 s — the file is reused; `refresh=True` re-downloads |
+| `build_map` / `build_scene` (any layer count) | under 25 ms — it writes HTML, the browser does the rest |
+| 2D page until `view.when()` resolves (headless Chrome, 3 layers, no GPU) | 2.8 s, 250 requests |
+
+The 3D scene is heavier on the client: same data plus terrain tiles and WebGL. On a GPU-less headless
+browser it stays saturated well past 30 s, which says nothing useful about a real machine — open
+`scene.html` locally and read `window.__readyMs` in the console for your own number.
+
+The model-facing cost is small by design: a full search → load → build_map flow returns roughly
+2,600 characters of JSON, so the agent does not need long reasoning to produce a map.
 
 ## Design notes
 

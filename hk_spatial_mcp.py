@@ -161,24 +161,34 @@ def search_hk_data(keyword: str = "", limit: int = 10, offset: int = 0) -> str:
                        "next": "load_hk_data(dataset_id) then build_map([...])"}, ensure_ascii=False)
 
 
-def load_hk_data(dataset_id: str, name: str = "") -> str:
+def load_hk_data(dataset_id: str, name: str = "", refresh: bool = False) -> str:
     """Download one CSDI dataset as GeoJSON (WGS84) into the workspace. Returns a SUMMARY, not the
-    data itself — never paste the features into the chat, put them on a map with build_map()."""
-    try:
-        fc = json.loads(_http(CSDI_FILE.format(urllib.parse.quote(dataset_id)), timeout=180))
-    except urllib.error.HTTPError as e:
-        return json.dumps({
-            "error": f"{dataset_id}: HTTP {e.code} from the CSDI export endpoint",
-            "likely": "metadata-only / non-spatial dataset (13 of ~1150 have no GeoJSON export), "
-                      "or the id is wrong — call search_hk_data() and use a hit whose exportable is true",
-            "metadata_page": f"https://portal.csdi.gov.hk/geoportal/rest/metadata/item/{dataset_id}/html",
-        }, ensure_ascii=False)
+    data itself — never paste the features into the chat, put them on a map with build_map().
+    The local copy is reused on later calls; pass refresh=True to re-download."""
+    path = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', dataset_id)}.geojson"
+    cached = path.exists() and not refresh
+    fc = None
+    if cached:
+        try:
+            fc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):  # truncated/partial file: fall through to a re-download
+            cached = False
+    if fc is None:
+        try:
+            fc = json.loads(_http(CSDI_FILE.format(urllib.parse.quote(dataset_id)), timeout=180))
+        except urllib.error.HTTPError as e:
+            return json.dumps({
+                "error": f"{dataset_id}: HTTP {e.code} from the CSDI export endpoint",
+                "likely": "metadata-only / non-spatial dataset (13 of ~1150 have no GeoJSON export), "
+                          "or the id is wrong — call search_hk_data() and use a hit whose exportable is true",
+                "metadata_page": f"https://portal.csdi.gov.hk/geoportal/rest/metadata/item/{dataset_id}/html",
+            }, ensure_ascii=False)
     feats = fc.get("features") or []
     if not feats:
         return json.dumps({"error": f"{dataset_id}: dataset returned 0 features (not spatial or empty)"})
-    (WORK / "data").mkdir(parents=True, exist_ok=True)
-    path = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', dataset_id)}.geojson"
-    path.write_text(json.dumps(fc, ensure_ascii=False), encoding="utf-8")
+    if not cached:
+        (WORK / "data").mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(fc, ensure_ascii=False), encoding="utf-8")
     if name:  # sidecar so build_map can label the layer with the dataset title
         path.with_suffix(".name").write_text(name, encoding="utf-8")
     lons, lats = [], []
@@ -191,7 +201,7 @@ def load_hk_data(dataset_id: str, name: str = "") -> str:
         "fields": list((feats[0].get("properties") or {}).keys())[:20],
         "bbox": [round(min(lons), 5), round(min(lats), 5), round(max(lons), 5), round(max(lats), 5)]
         if lons else None,
-        "file": str(path),
+        "file": str(path), "cached": cached,
         "next": "call build_map([dataset_id, ...]) to see it in the ArcGIS web map",
     }, ensure_ascii=False)
 
@@ -622,7 +632,8 @@ const view = MODE === "3d"
                 tilt: TILT, heading: 12 },
     })
   : new MapView({ container: "view", map, center: HK, zoom: 11 });
-window.__view = view;
+window.__view = view;  // exposed for tests/debugging
+view.when(() => { window.__readyMs = Math.round(performance.now()); }).catch(() => {});
 const box = document.getElementById("layers");
 
 LAYERS.forEach((L, i) => {

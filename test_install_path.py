@@ -38,7 +38,7 @@ async def main():
             field = (ov.get("groupable_fields") or [{}])[0].get("field")
             agg = await call("summarise_hk_data", {"dataset_id": did, "group_by": field, "top": 3})
             print(f"1b summarise  : {len(agg.get('rows', []))} groups, chart {agg.get('chart_url')}")
-            assert agg.get("rows") and "chart.html" in agg["chart_url"]
+            assert agg.get("rows") and "chart-" in agg["chart_url"], agg
 
             out = await call("load_hk_data", {"dataset_id": did, "name": out["hits"][0]["title"]})
             print(f"2 load        : {out['features']} features, {out['geometry']}, bbox {out['bbox']}")
@@ -51,7 +51,8 @@ async def main():
 
             out = await call("build_scene", {"dataset_ids": [did], "title": "smoke 3D", "tilt": 60})
             print(f"4 build_scene : {out['url']} ({out['mode']})")
-            assert out["mode"] == "3d" and out["url"].endswith("scene.html")
+            assert out["mode"] == "3d" and out["url"].endswith(".html"), out
+            assert out["latest_url"].endswith("scene.html"), out
 
             out = await call("geocode_address", {"single_line": "Central, Hong Kong", "max_results": 2})
             print(f"5 geocode     : {out['candidates'][0]['address']} @ {out['candidates'][0]['lon']:.4f}")
@@ -81,6 +82,11 @@ async def main():
                                                    "basemap": "streets", "size": "600,400"})
             print(f"10 static png : {out['bytes']} bytes -> {out['url']}")
             assert out["bytes"] > 5000
+
+            svg = await call("export_static_svg", {"dataset_ids": [did], "title": "smoke static",
+                                                   "basemap": "topographic"})
+            print(f"10b static svg: {svg['size_px']} at z{svg['zoom']}, {svg['features']} features")
+            assert svg["features"] > 0 and svg["url"].endswith(".svg")
 
             out = await call("arcgis_request", {"path": "search", "params": {"q": "test", "num": 1}})
             print(f"11 arcgis_request without token: {str(out)[:110]}")

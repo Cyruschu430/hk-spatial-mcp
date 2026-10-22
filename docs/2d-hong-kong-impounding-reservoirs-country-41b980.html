@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>HK Spatial — ArcGIS</title>
+<link rel="icon" href="data:," />
+<style>
+  :root{--bg:#080b12;--glass:rgba(14,20,32,.72);--line:rgba(120,160,220,.18);--fg:#e6eefc;--dim:#8fa3c0;--teal:#3fe0d0}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+    font:13px/1.45 ui-sans-serif,-apple-system,"Segoe UI","PingFang HK","Microsoft JhengHei",sans-serif}
+  #view{position:absolute;inset:0}
+  #panel{position:absolute;top:14px;left:14px;z-index:10;width:286px;max-height:calc(100% - 28px);
+    overflow:auto;background:var(--glass);border:1px solid var(--line);border-radius:14px;
+    padding:14px 14px 10px;backdrop-filter:blur(16px) saturate(150%);
+    box-shadow:0 18px 48px rgba(0,0,0,.5)}
+  h1{margin:0 0 2px;font-size:14px;font-weight:650;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:11px;margin-bottom:12px}
+  .layer{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:9px;cursor:pointer;
+    border:1px solid transparent}
+  .layer:hover{background:rgba(120,160,220,.08);border-color:var(--line)}
+  .layer input{accent-color:var(--teal);margin:0;width:13px;height:13px}
+  .sw{width:9px;height:9px;border-radius:3px;flex:0 0 auto}
+  .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+  .ct{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
+  .foot{margin-top:10px;padding-top:9px;border-top:1px solid var(--line);color:var(--dim);font-size:10px}
+  #info{position:absolute;left:14px;bottom:14px;z-index:10;width:330px;max-height:44vh;overflow:auto;
+    background:var(--glass);border:1px solid var(--line);border-radius:14px;padding:12px 14px;
+    backdrop-filter:blur(16px) saturate(150%);box-shadow:0 18px 44px rgba(0,0,0,.45)}
+  #info[hidden]{display:none}
+  #info .ih{font-weight:600;font-size:13px;color:var(--fg);margin-bottom:8px;padding-bottom:7px;
+    border-bottom:1px solid var(--line)}
+  #info .ir{display:flex;gap:10px;padding:2.5px 0}
+  #info .ik{flex:0 0 42%;color:var(--dim);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;
+    word-break:break-word}
+  #info .iv{flex:1;color:var(--fg);word-break:break-word;font-size:12px}
+  .esri-ui .esri-attribution{position:absolute!important;bottom:0!important;right:0!important;
+    left:auto!important;top:auto!important;background:rgba(8,11,18,.8)!important;color:var(--dim)!important;
+    font-size:10px!important;border-radius:8px 0 0 0;padding:3px 8px!important}
+  .esri-ui .esri-attribution a{color:var(--teal)!important}
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="panel">
+  <h1 id="ttl"></h1>
+  <div class="sub">Hong Kong CSDI data · ArcGIS Maps SDK 5 · <span id="mode"></span></div>
+  <div id="layers"></div>
+  <div class="foot">Data: CSDI portal.csdi.gov.hk · Basemap: Esri · Powered by Esri</div>
+</div>
+<div id="info" hidden></div>
+<script type="module">
+import Map from "https://js.arcgis.com/5.0/@arcgis/core/Map.js";
+import MapView from "https://js.arcgis.com/5.0/@arcgis/core/views/MapView.js";
+import SceneView from "https://js.arcgis.com/5.0/@arcgis/core/views/SceneView.js";
+import ElevationLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/ElevationLayer.js";
+import TileLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/TileLayer.js";
+import GeoJSONLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/GeoJSONLayer.js";
+
+const LAYERS = [{"id": "wsd_rcd_1629267205232_96199", "name": "Impounding Reservoirs", "url": "data/wsd_rcd_1629267205232_96199.geojson", "count": 17, "gtype": "Polygon", "fields": ["OBJECTID", "INSTALLATION_ID", "NAME", "CHINESE_NAME", "LOCATION", "LOCATION_CHINESE", "SYSTEM", "CAPACITY", "Shape_Length", "Shape_Area"], "title_field": "NAME"}, {"id": "afcd_rcd_1728896853370_57183", "name": "Country Park Attractions", "url": "data/afcd_rcd_1728896853370_57183.geojson", "count": 53, "gtype": "Point", "fields": ["LOCATION_EN", "LOCATION_TC", "WEBSITE", "NAME_EN", "NAME_TC", "EASTING", "NORTHING", "OBJECTID"], "title_field": "LOCATION_EN"}];
+const TITLE = "Hong Kong — Impounding Reservoirs & Country Park Attractions";
+const BASEMAP_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer";
+const LABELS_URL = "";
+const MODE = "2d";
+const TILT = 60.0;
+const ELEV_URL = "https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer";
+const COLORS = ["#3fe0d0", "#f5a524", "#7c8cff", "#ff6b9d", "#8ce99a", "#ffd43b"];
+const hex = c => [1, 3, 5].map(i => parseInt(c.substr(i, 2), 16));
+
+document.getElementById("ttl").textContent = TITLE;
+document.getElementById("mode").textContent =
+  (MODE === "3d" ? "3D scene" : "2D map") + " · " + LAYERS.length + " layer" + (LAYERS.length > 1 ? "s" : "");
+const map = new Map({ basemap: null });
+if (BASEMAP_URL) map.add(new TileLayer({ url: BASEMAP_URL }));
+if (LABELS_URL) map.add(new TileLayer({ url: LABELS_URL }));
+if (MODE === "3d") map.ground = { layers: [new ElevationLayer({ url: ELEV_URL })] };
+
+const HK = [114.1694, 22.3193];
+const view = MODE === "3d"
+  ? new SceneView({
+      container: "view", map, zoom: 12,
+      camera: { position: { x: HK[0], y: HK[1], z: 2400, spatialReference: { wkid: 4326 } },
+                tilt: TILT, heading: 12 },
+    })
+  : new MapView({ container: "view", map, center: HK, zoom: 11 });
+window.__view = view;  // exposed for tests/debugging
+view.when(() => { window.__readyMs = Math.round(performance.now()); }).catch(() => {});
+
+// click a feature -> attribute card (bottom left)
+const info = document.getElementById("info");
+const PRETTY = { NAME_EN: "Name (EN)", NAME_TC: "名稱（中文）", LOCATION_EN: "Location (EN)",
+                 LOCATION_TC: "位置（中文）", WEBSITE: "Website", EASTING: "Easting (HK80)",
+                 NORTHING: "Northing (HK80)" };
+view.on("click", async (event) => {
+  try {
+    const hit = (await view.hitTest(event)).results.find(r => r.graphic && r.graphic.layer);
+    if (!hit) { info.hidden = true; return; }
+    const a = hit.graphic.attributes || {};
+    const rows = Object.keys(a)
+      .filter(k => !k.startsWith("__") && a[k] !== null && a[k] !== "")
+      .slice(0, 24)
+      .map(k => {
+        const label = PRETTY[k] || k;
+        const v = /^https?:\/\//.test(String(a[k]))
+          ? `<a href="${a[k]}" target="_blank" rel="noopener" style="color:#3fe0d0">link</a>`
+          : String(a[k]);
+        return `<div class="ir"><span class="ik">${label}</span><span class="iv">${v}</span></div>`;
+      }).join("");
+    const heading = a.NAME_TC && a.NAME_EN ? `${a.NAME_EN} · ${a.NAME_TC}` : (hit.graphic.layer.title || "");
+    info.innerHTML = `<div class="ih">${heading}</div>${rows}`;
+    info.hidden = false;
+    window.__info = a;  // exposed for tests
+  } catch (e) { info.hidden = true; }
+});
+const box = document.getElementById("layers");
+
+LAYERS.forEach((L, i) => {
+  const color = COLORS[i % COLORS.length];
+  const gtype = L.gtype || "Point";
+  const isPoint = gtype.includes("Point");
+  const isLine = gtype.includes("Line");
+  const symbol = isPoint
+    ? { type: "simple-marker", color, size: 7, outline: { color: "#0b1018", width: 1 } }
+    : isLine
+      ? { type: "simple-line", color, width: 2 }
+      : { type: "simple-fill", color: [...hex(color), 0.35],
+          outline: { color, width: 1.2 } };
+  // ponytail: no SDK popup. In 5.0 the popup UI is a beta component that a programmatic View does
+  // not inject, and popupEnabled alone opens nothing. One click handler + one card is smaller,
+  // version-proof, and looks intentional.
+  const opts = { title: L.name || L.id, url: L.url, popupEnabled: false, outFields: ["*"],
+                 renderer: { type: "simple", symbol } };
+  // in 3D, drape lines and polygons onto the terrain instead of floating at sea level
+  if (MODE === "3d" && !isPoint) opts.elevationInfo = { mode: "on-the-ground" };
+  const gl = new GeoJSONLayer(opts);
+  map.add(gl);
+
+  const row = document.createElement("label");
+  row.className = "layer";
+  row.innerHTML = `<input type="checkbox" checked>
+    <span class="sw" style="background:${color}"></span>
+    <span class="nm" title="${L.id}">${L.name || L.id}</span>
+    <span class="ct">${L.count}</span>`;
+  row.querySelector("input").onchange = e => { gl.visible = e.target.checked; };
+  box.appendChild(row);
+});
+
+await view.when();
+for (const lyr of map.layers.toArray().slice(1)) {
+  const ext = lyr.fullExtent;
+  if (ext && isFinite(ext.xmin)) { view.goTo(ext); break; }
+}
+</script>
+</body>
+</html>

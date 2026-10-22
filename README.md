@@ -4,7 +4,17 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![Protocol](https://img.shields.io/badge/protocol-MCP-6f42c1.svg)](https://modelcontextprotocol.io)
 
-![Hong Kong CSDI data on an interactive web map](preview.png)
+### ▶ [**Live demo — open the map**](https://cyruschu430.github.io/hk-spatial-mcp/) · [3D scene](https://cyruschu430.github.io/hk-spatial-mcp/scene.html)
+
+No install needed to look: that page is the unmodified output of `build_map`, exported to GitHub Pages.
+17 WSD impounding reservoirs and 53 AFCD country-park attractions on Esri imagery — pan, zoom and **click a
+feature to see every attribute field**.
+
+[![Hong Kong CSDI data on an interactive web map, with a feature's attributes shown](docs/demo-2d.png)](https://cyruschu430.github.io/hk-spatial-mcp/)
+
+*(Above: a reservoir selected in a real client — the attribute card is built by the server's click handler, not
+by a third-party popup library. Fields: `OBJECTID`, `INSTALLATION_ID`, `NAME`, `CHINESE_NAME`, `LOCATION`,
+`SYSTEM`, `CAPACITY`, `SHAPE_LENGTH`, `SHAPE_AREA`.)*
 
 [![selftest](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml/badge.svg)](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml)
 

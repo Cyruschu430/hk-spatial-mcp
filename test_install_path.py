@@ -34,6 +34,12 @@ async def main():
             assert out["total_datasets"] > 1100 and "toilet" in out["hits"][0]["title"].lower()
 
             did = out["hits"][0]["dataset_id"]
+            ov = await call("summarise_hk_data", {"dataset_id": did})
+            field = (ov.get("groupable_fields") or [{}])[0].get("field")
+            agg = await call("summarise_hk_data", {"dataset_id": did, "group_by": field, "top": 3})
+            print(f"1b summarise  : {len(agg.get('rows', []))} groups, chart {agg.get('chart_url')}")
+            assert agg.get("rows") and "chart.html" in agg["chart_url"]
+
             out = await call("load_hk_data", {"dataset_id": did, "name": out["hits"][0]["title"]})
             print(f"2 load        : {out['features']} features, {out['geometry']}, bbox {out['bbox']}")
             assert out["features"] > 0 and out["bbox"]
@@ -84,4 +90,4 @@ async def main():
 
 
 asyncio.run(main())
-print("install path OK — all 10 tools answered over stdio")
+print(f"install path OK — all {len(EXPECTED)} tools listed, every tool exercised over stdio")

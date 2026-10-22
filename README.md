@@ -6,6 +6,10 @@ An **MCP server for Hong Kong CSDI spatial data** — any MCP-capable AI agent c
 Common Spatial Data Infrastructure catalogue (1,154 official datasets), pull the geometry, and turn it
 into a live interactive map, without writing fetch code or knowing the portal's quirks.
 
+> **Unofficial, community project.** CSDI is operated by the Spatial Data Office, Development Bureau
+> (HKSAR Government). The Office has said it plans to develop its own CSDI MCP server in 2027 — this
+> repo is an independent implementation and claims no affiliation.
+
 Data is the point: **CSDI is the source of truth here**. The bundled web map is rendered with the
 ArcGIS Maps SDK (keyless public tiles, "Powered by Esri" attribution kept), and optional tools can
 publish to / read from ArcGIS Online — but nothing about the server requires ArcGIS to be useful.

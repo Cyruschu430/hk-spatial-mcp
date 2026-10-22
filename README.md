@@ -1,23 +1,42 @@
 # hk-spatial-mcp
 
+### Hong Kong's **1,154 official spatial datasets** → any AI agent, in one function call.
+
+Point any MCP-capable client at this server and it can search the whole Common Spatial Data
+Infrastructure catalogue in English, 繁體中文 or 简体中文, pull real GeoJSON, answer questions with
+numbers and charts, and hand back a 2D map, a 3D scene or a printable static map. **No ArcGIS account,
+no API key, no GIS library, no `npm install`** — one Python process and the open data itself.
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![Protocol](https://img.shields.io/badge/protocol-MCP-6f42c1.svg)](https://modelcontextprotocol.io)
+[![Datasets](https://img.shields.io/badge/CSDI_datasets-1%2C154-brightgreen.svg)](#data-source-and-coverage)
+[![Dependencies](https://img.shields.io/badge/runtime_dependencies-0-success.svg)](#requirements)
+[![selftest](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml/badge.svg)](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml)
 
-### ▶ [**Live demo — open the map**](https://cyruschu430.github.io/hk-spatial-mcp/) · [3D scene](https://cyruschu430.github.io/hk-spatial-mcp/scene.html)
+| | |
+|---|---|
+| **Ask in Cantonese, get an answer** | `用 hk-spatial 講我知香港有幾多個水塘, 可唔可以 build 個 map 比我睇下` → 17 reservoirs, 586.05 million m³, chart, then the map below. Takes ~2 minutes end to end, most of it the model thinking. |
+| **Any of the 1,154 datasets** | EV chargers by district · registered man-made slopes · private buildings · public toilets · 3D pedestrian network · hospitals · country-park attractions · waste facilities · school social work · district boundaries. The reservoirs below are **one example**, not the scope. |
 
-No install needed to look: that page is the unmodified output of `build_map`, exported to GitHub Pages.
-17 WSD impounding reservoirs and 53 AFCD country-park attractions on Esri imagery — pan, zoom and **click a
-feature to see every attribute field**.
+## See it work
+
+**A conversation, not a config file** — the real client run behind the answer above:
+
+![An MCP client answering a Cantonese question with cards, a chart and a map from CSDI data](docs/demo-client.gif)
+
+**The map it returned** — [▶ **open it live**](https://cyruschu430.github.io/hk-spatial-mcp/)
+([3D scene](https://cyruschu430.github.io/hk-spatial-mcp/scene.html)): pan, zoom, and **click any feature to see
+every attribute field**. No install needed to look; these pages are the unmodified output of `build_map` /
+`build_scene`, served as static files.
 
 [![Hong Kong CSDI data on an interactive web map, with a feature's attributes shown](docs/demo-2d.jpg)](https://cyruschu430.github.io/hk-spatial-mcp/)
 
-*(Above: a reservoir selected in a real client — the attribute card is built by the server's click handler, not
-by a third-party popup library. Fields: `OBJECTID`, `INSTALLATION_ID`, `NAME`, `CHINESE_NAME`, `LOCATION`,
-`SYSTEM`, `CAPACITY`, `SHAPE_LENGTH`, `SHAPE_AREA`.)*
+*(Attribute card from `OBJECTID` to `SHAPE_AREA` is built by the server's own click handler — not a third-party
+popup library. Basemap tiles are keyless Esri; data is CSDI open data.)*
 
-The demo is not a mock-up and not a separate app: `docs/` is the plain output of these two calls, served as
-static files. Regenerate it yourself with
+The demo is not a mock-up and not a separate app: `docs/` is the plain output of these calls. Regenerate it
+with any other dataset IDs you like:
 
 ```bash
 HK_MCP_DIR=./docs python3 -c "
@@ -28,13 +47,6 @@ m.build_map([res, att], 'Hong Kong — Impounding Reservoirs & Country Park Attr
 m.build_scene([res], 'Hong Kong Impounding Reservoirs', 'imagery', tilt=65)"
 ```
 
-[![selftest](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml/badge.svg)](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml)
-
-An **MCP (Model Context Protocol) server for Hong Kong CSDI spatial data**. It gives any MCP-capable AI
-client the ability to search the entire Common Spatial Data Infrastructure catalogue, retrieve datasets
-as GeoJSON, and render them as an interactive web map — without writing HTTP code or knowing the
-portal's data-export conventions.
-
 > **Unofficial, community project.** CSDI is operated by the Spatial Data Office, Development Bureau,
 > HKSAR Government. The Office has stated that it plans to develop its own CSDI MCP server in 2027.
 > This repository is an independent implementation and claims no affiliation with the Government, the
@@ -42,6 +54,7 @@ portal's data-export conventions.
 
 **Contents**
 
+- [See it work](#see-it-work)
 - [Capabilities](#capabilities)
 - [Requirements](#requirements)
 - [Installation](#installation)

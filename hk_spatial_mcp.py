@@ -207,6 +207,92 @@ def load_hk_data(dataset_id: str, name: str = "", refresh: bool = False) -> str:
     }, ensure_ascii=False)
 
 
+
+# ---------------------------------------------------------------- dataset status
+
+def _age_days(date_str: str) -> float | None:
+    """'2026-03-14' -> days since. None if the catalogue gave nothing usable."""
+    try:
+        return round((time.time() - time.mktime(time.strptime(date_str[:10], "%Y-%m-%d"))) / 86400, 1)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _probe_export(dataset_id: str, timeout: int = 15) -> dict:
+    """Is the CSDI export endpoint still serving THIS dataset?
+    Reads 2 KB and hangs up — never pulls the whole GeoJSON just to say 'yes'."""
+    url = CSDI_FILE.format(urllib.parse.quote(dataset_id))
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "hk-spatial-mcp"}), timeout=timeout) as r:
+            head = r.read(2048)
+        ms = int((time.time() - t0) * 1000)
+        if head.lstrip()[:1] in (b"{", b"["):
+            return {"http": r.status, "ms": ms, "body": "geojson"}
+        return {"http": r.status, "ms": ms, "body": "unexpected", "sample": head[:80].decode("utf-8", "replace")}
+    except urllib.error.HTTPError as e:
+        return {"http": e.code, "ms": int((time.time() - t0) * 1000),
+                "body": "error", "note": "HTTP error — likely metadata-only (no GeoJSON export) or a wrong id"}
+    except Exception as e:  # timeout, DNS, TLS — all mean "not serving right now"
+        return {"http": None, "ms": int((time.time() - t0) * 1000), "body": "unreachable",
+                "note": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
+def dataset_status(dataset_id: str = "", probe: bool = False, limit: int = 10,
+                   stale_after_days: int = 365) -> str:
+    """Are these datasets still being served, and how stale are they?
+
+    No dataset_id -> lists the `limit` oldest datasets in the catalogue, so you can see drift at a
+    glance. probe=True also calls the CSDI export endpoint to confirm it answers right now (reads
+    2 KB only, costs a round trip each — capped at 10 per call).
+
+    Treat catalogue date and data freshness as SEPARATE things: the date below is CSDI's
+    dct:modified (when the record was revised), not the statistical reference period of the data.
+    """
+    cat = _catalog()
+    limit = max(1, min(limit, 30))
+
+    if dataset_id:
+        picked = [d for d in cat if d["id"] == dataset_id]
+        if not picked:
+            near = [d["id"] for d in cat if dataset_id[:12] in d["id"]][:5]
+            return json.dumps({"error": f"{dataset_id} not in the catalogue",
+                               "similar_ids": near,
+                               "next": "search_hk_data(keyword) to get a valid dataset_id"},
+                              ensure_ascii=False)
+    else:
+        picked = sorted(cat, key=lambda d: d["updated"] or "9999")[:limit]
+
+    rows, probed = [], 0
+    for d in picked:
+        age = _age_days(d["updated"])
+        f = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', d['id'])}.geojson"
+        row = {
+            "dataset_id": d["id"], "title": d["title"][:80], "title_zh": d["title_zh"][:40] or None,
+            "org": d["org"], "catalogue_updated": d["updated"] or None,
+            "age_days": age,
+            "state": ("stale" if age is not None and age > stale_after_days
+                      else "aging" if age is not None and age > stale_after_days / 2
+                      else "fresh" if age is not None else "unknown"),
+            "exportable": d["exportable"],
+            "local_cache": ({"bytes": f.stat().st_size, "age_days": round((time.time() - f.stat().st_mtime) / 86400, 1)}
+                            if f.exists() else None),
+        }
+        if probe and d["exportable"] and probed < 10:
+            row["live"] = _probe_export(d["id"])
+            probed += 1
+        rows.append(row)
+
+    return json.dumps({
+        "checked": len(rows), "probed": probed,
+        "dates_basis": "CSDI catalogue dct:modified — record revision date, NOT the data's reference period",
+        "stale_after_days": stale_after_days,
+        "stale": sum(1 for r in rows if r["state"] == "stale"),
+        "datasets": rows,
+        "next": "load_hk_data(dataset_id, refresh=True) to re-pull anything that moved",
+    }, ensure_ascii=False)
+
+
 def _coords(geom):
     """Yield (lon, lat) from any GeoJSON geometry — point, line, polygon, multi."""
     t, c = geom.get("type"), geom.get("coordinates")
@@ -1052,7 +1138,7 @@ def main():
     mcp = Server("hk-spatial")
     for fn in (search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
                geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
-               arcgis_request, publish_layer):
+               arcgis_request, publish_layer, dataset_status):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":
@@ -1124,6 +1210,14 @@ if __name__ == "__main__":
         assert "chart-" in agg["chart_url"], agg["chart_url"]
         assert "<svg" in _http(agg["chart_url"]).decode(), "chart page not served"
         print(f"  summarise   -> {len(agg['rows'])} groups, {agg['rows'][0]['count']} max, chart served")
+        st = json.loads(dataset_status(limit=5))
+        assert st["checked"] == 5 and st["dates_basis"], st
+        ages = [d["age_days"] for d in st["datasets"] if d["age_days"] is not None]
+        assert ages == sorted(ages, reverse=True), f"status order: {ages}"
+        assert all(d["state"] in ("fresh", "aging", "stale") for d in st["datasets"]), st
+        live = json.loads(dataset_status(hits[0]["dataset_id"], probe=True))["datasets"][0]["live"]
+        assert live["http"] == 200, live
+        print(f"  status      -> {st['stale']}/{st['checked']} stale, probe {live['http']} in {live['ms']} ms")
         hits = json.loads(search_hk_data("country park", 3))["hits"]
         s = json.loads(load_hk_data(hits[0]["dataset_id"], hits[0]["title"]))
         assert s.get("features", 0) > 0, s

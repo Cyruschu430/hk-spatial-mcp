@@ -66,7 +66,8 @@ and the ArcGIS Online tools are optional extensions that require your own creden
   `http.server`, `threading`, `pathlib`) — verified by running them under `python3 -S`, which disables
   site-packages entirely. `mcp` is imported inside `main()` only, so it is needed to *serve* MCP, never to
   use the functions from your own code.
-- An MCP-capable client (Claude Desktop, Cursor, WorkBuddy / CodeBuddy, Codex, Hermes, or any stdio MCP client)
+- An MCP-capable client (Claude Desktop, Cursor, WorkBuddy / CodeBuddy, Codex, Hermes, **DeepSeek Harness
+  (DSH)**, or any stdio MCP client)
 - Network access to `portal.csdi.gov.hk`
 - *Optional:* an ArcGIS Online user or OAuth token, needed only for the publishing and content tools
 
@@ -99,9 +100,16 @@ Configuration file locations vary by client:
 | Cursor | `<project>/.cursor/mcp.json` |
 | WorkBuddy / CodeBuddy | `~/.workbuddy/mcp.json` or `<project>/.workbuddy/mcp.json` |
 | Codex | `~/.codex/config.toml` |
+| DeepSeek Harness (DSH) | its own MCP server settings, added as an stdio entry named `hk-spatial` — set a generous `toolCallTimeoutMs` (180000) so large layers are not cut off |
 
 Any client that speaks MCP over stdio will work; the JSON shape above is the common form. Once the
 client reports the server as connected, the tools are available in the conversation.
+
+**DeepSeek Harness note.** DSH keeps its own cache of the `uvx` environment, so after a new release run
+`uv cache prune` (or `uvx --refresh …`) before expecting the new tools — otherwise you keep testing the
+previous version. Its MCP client connects over stdio exactly as in the JSON above; a full
+search → summarise → map → click-a-feature flow completes in about two minutes end to end, most of it the
+model thinking rather than the tools.
 
 **Windows note.** `uvx --from git+…` needs `git` on `PATH`. Set `HK_MCP_DIR` to an absolute path
 (for example `C:\\Users\\you\\hk-spatial`) — the default `./hk-spatial` is relative to whatever working
@@ -321,6 +329,29 @@ is either `FIELD=value` (case-insensitive match on that field) or bare text sear
 Rows are hard-capped at 20 and each row carries its `_geometry` type and first vertex — this tool exists to
 check a number, not to dump a dataset.
 
+### `dataset_status(dataset_id="", probe=False, limit=10, stale_after_days=365)`
+
+Answers "is this dataset still there, and how old is it?" — the question every downstream user
+asks only after something breaks.
+
+- **No `dataset_id`** → the `limit` oldest datasets in the catalogue, so drift is visible at a glance.
+- **`probe=True`** → also calls the CSDI export endpoint and reports HTTP status + latency. Reads
+  **2 KB and hangs up**, so it never re-downloads a dataset just to say "yes". Capped at 10 probes
+  per call.
+- Reports catalogue `dct:modified` age, a `fresh` / `aging` / `stale` verdict, the `exportable` flag,
+  and the local cache size/age if you have already downloaded it.
+
+> **Catalogue date ≠ data freshness.** `catalogue_updated` is when CSDI revised the *record*.
+> The statistical reference period of the data itself is a separate thing and is not reported here.
+> Keep both when you cite.
+
+```json
+{"checked": 5, "probed": 1, "stale": 5,
+ "datasets": [{"dataset_id": "landsd_rcd_1631586233...", "catalogue_updated": "2022-03-31",
+               "age_days": 1667.0, "state": "stale", "exportable": true, "local_cache": null,
+               "live": {"http": 200, "ms": 228, "body": "geojson"}}]}
+```
+
 ### `build_map(dataset_ids, title="Hong Kong Spatial Data", basemap="imagery", labels=False)`
 
 Builds an interactive map from the loaded datasets and serves it on `http://localhost:<HK_MCP_PORT>/`.
@@ -532,6 +563,7 @@ Measured on a 2 vCPU / 3.5 GB VPS with a warm catalogue cache:
 | `load_hk_data`, cache hit (same layer) | 0.3 s — the file is reused; `refresh=True` re-downloads |
 | `build_map` / `build_scene` (any layer count) | under 25 ms — it writes HTML, the browser does the rest |
 | 2D page until `view.when()` resolves (headless Chrome, 3 layers, no GPU) | 2.8 s, 250 requests |
+| Whole flow in a real client (DeepSeek Harness: search → summarise → map → click a feature) | ~2 min wall clock, dominated by model thinking |
 
 The 3D scene is heavier on the client: same data plus terrain tiles and WebGL. On a GPU-less headless
 browser it stays saturated well past 30 s, which says nothing useful about a real machine — open

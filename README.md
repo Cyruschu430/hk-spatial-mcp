@@ -16,6 +16,18 @@ feature to see every attribute field**.
 by a third-party popup library. Fields: `OBJECTID`, `INSTALLATION_ID`, `NAME`, `CHINESE_NAME`, `LOCATION`,
 `SYSTEM`, `CAPACITY`, `SHAPE_LENGTH`, `SHAPE_AREA`.)*
 
+The demo is not a mock-up and not a separate app: `docs/` is the plain output of these two calls, served as
+static files. Regenerate it yourself with
+
+```bash
+HK_MCP_DIR=./docs python3 -c "
+import hk_spatial_mcp as m
+res, att = 'wsd_rcd_1629267205232_96199', 'afcd_rcd_1728896853370_57183'
+m.load_hk_data(res); m.load_hk_data(att)
+m.build_map([res, att], 'Hong Kong — Impounding Reservoirs & Country Park Attractions', 'imagery')
+m.build_scene([res], 'Hong Kong Impounding Reservoirs', 'imagery', tilt=65)"
+```
+
 [![selftest](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml/badge.svg)](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml)
 
 An **MCP (Model Context Protocol) server for Hong Kong CSDI spatial data**. It gives any MCP-capable AI

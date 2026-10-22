@@ -1,0 +1,25 @@
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the single dependency
+        run: pip install "mcp>=1.2"
+
+      - name: Self-test (catalogue, search, load, map, geocode, geometry, elevation, static export)
+        run: python hk_spatial_mcp.py --selftest
+
+      - name: MCP stdio protocol test
+        run: python test_mcp_client.py

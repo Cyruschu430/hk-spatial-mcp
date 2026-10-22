@@ -281,17 +281,17 @@ def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page:
             p = pathlib.Path(r["file"])
         label = p.with_suffix(".name")
         fc = json.loads(p.read_text(encoding="utf-8"))
-        entry = {"id": did, "name": label.read_text(encoding="utf-8") if label.exists() else did}
-        # ponytail: inline up to 3000 features; bigger layers stream from the served file so the
-        # HTML stays small (61k polygons inline = tens of MB, browser dies).
-        if len(fc.get("features") or []) > 3000:
-            entry["url"] = f"data/{p.name}"
-            if p.stat().st_size > 60_000_000:  # honest warning, never silently sample the data
-                warn.append(f"{did} is {p.stat().st_size // 1_000_000} MB / "
-                            f"{len(fc['features'])} features — the browser will be slow; "
-                            f"pick a smaller or district-level dataset for a live demo")
-        else:
-            entry["data"] = fc
+        feats = fc.get("features") or []
+        gtype = ((feats[0].get("geometry") or {}).get("type") or "Point") if feats else "Point"
+        # Every layer is served from disk and referenced by URL. GeoJSONLayer with an inline `blob`
+        # fails to load on SDK 5.0 ("Cannot read properties of null (reading 'type')"), and urls keep
+        # the HTML small for big layers — one code path, no size threshold.
+        entry = {"id": did, "name": label.read_text(encoding="utf-8") if label.exists() else did,
+                 "url": f"data/{p.name}", "count": len(feats), "gtype": gtype}
+        if p.stat().st_size > 60_000_000:  # honest warning, never silently sample the data
+            warn.append(f"{did} is {p.stat().st_size // 1_000_000} MB / "
+                        f"{len(feats)} features — the browser will be slow; "
+                        f"pick a smaller or district-level dataset for a live demo")
         layers.append(entry)
     if not layers:
         return json.dumps({"error": "nothing to map", "details": missing})
@@ -314,7 +314,7 @@ def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page:
     return json.dumps({"url": base + (page if page != "index.html" else ""),
                        "mode": mode,
                        "layers": [l["id"] for l in layers],
-                       "features": sum(len(l["data"]["features"]) if "data" in l else 0 for l in layers),
+                       "features": sum(l.get("count", 0) for l in layers),
                        "missing": missing, "warn": warn,
                        "next": "open the url in your client's browser/preview pane (refresh to see changes)"})
 
@@ -648,8 +648,7 @@ const box = document.getElementById("layers");
 
 LAYERS.forEach((L, i) => {
   const color = COLORS[i % COLORS.length];
-  const feats = L.data?.features || [];
-  const gtype = (feats[0] || {}).geometry?.type || "Point";
+  const gtype = L.gtype || "Point";
   const isPoint = gtype.includes("Point");
   const isLine = gtype.includes("Line");
   const symbol = isPoint
@@ -658,10 +657,8 @@ LAYERS.forEach((L, i) => {
       ? { type: "simple-line", color, width: 2 }
       : { type: "simple-fill", color: [...hex(color), 0.35],
           outline: { color, width: 1.2 } };
-  const opts = { title: L.name || L.id, url: L.url, data: L.data,
-                 popupEnabled: true, outFields: ["*"] };
-  // a url-based layer has no geometry to inspect — let GeoJSONLayer auto-render it
-  if (!L.url) opts.renderer = { type: "simple", symbol };
+  const opts = { title: L.name || L.id, url: L.url, popupEnabled: true, outFields: ["*"],
+                 renderer: { type: "simple", symbol } };
   // in 3D, drape lines and polygons onto the terrain instead of floating at sea level
   if (MODE === "3d" && !isPoint) opts.elevationInfo = { mode: "on-the-ground" };
   const gl = new GeoJSONLayer(opts);
@@ -672,7 +669,7 @@ LAYERS.forEach((L, i) => {
   row.innerHTML = `<input type="checkbox" checked>
     <span class="sw" style="background:${color}"></span>
     <span class="nm" title="${L.id}">${L.name || L.id}</span>
-    <span class="ct">${L.url ? "large" : feats.length}</span>`;
+    <span class="ct">${L.count}</span>`;
   row.querySelector("input").onchange = e => { gl.visible = e.target.checked; };
   box.appendChild(row);
 });

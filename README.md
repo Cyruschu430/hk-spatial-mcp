@@ -6,6 +6,8 @@
 
 ![Hong Kong CSDI data on an interactive web map](preview.png)
 
+[![selftest](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml/badge.svg)](https://github.com/Cyruschu430/hk-spatial-mcp/actions/workflows/selftest.yml)
+
 An **MCP (Model Context Protocol) server for Hong Kong CSDI spatial data**. It gives any MCP-capable AI
 client the ability to search the entire Common Spatial Data Infrastructure catalogue, retrieve datasets
 as GeoJSON, and render them as an interactive web map — without writing HTTP code or knowing the

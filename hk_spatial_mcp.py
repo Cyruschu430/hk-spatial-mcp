@@ -473,14 +473,20 @@ def export_static_map(bbox: str | list | None = None, center: str | list | None 
 
 # ---------------------------------------------------------------- ArcGIS Online
 
+NO_TOKEN = ("ARCGIS_TOKEN is not set. Publishing and org-content reads need an ArcGIS Online "
+            "user/OAuth token (an API key only covers basemaps and geocoding). Put it in this MCP "
+            "server's env block in your client's config. Everything else — search, load, map, "
+            "geocode, geometry, elevation, static export — works without it.")
+
+
 def _token() -> str:
-    t = os.environ.get("ARCGIS_TOKEN") or ""
-    if not t:
-        raise RuntimeError(
-            "ARCGIS_TOKEN not set. Set an ArcGIS Online user/OAuth token to publish or read org "
-            "content (an API key only covers basemaps/geocoding). Add it to this MCP server's env "
-            "block in your client's config.")
-    return t
+    """Empty string when no token is configured — never raises, so tools can answer in JSON."""
+    return (os.environ.get("ARCGIS_TOKEN") or "").strip()
+
+
+def _no_token(tool: str) -> str:
+    return json.dumps({"error": f"{tool}: {NO_TOKEN}", "tool": tool, "needs": "ARCGIS_TOKEN"},
+                      ensure_ascii=False)
 
 
 def arcgis_request(path: str, params: dict | None = None, method: str = "GET") -> str:
@@ -494,6 +500,8 @@ def arcgis_request(path: str, params: dict | None = None, method: str = "GET") -
            params={"where":"1=1","outFields":"*","f":"json","returnCountOnly":"true"} → count
       analysis: run a GP task under <gpServiceUrl>/<task>/submitJob (then /jobs/<jobId>)
     """
+    if not _token():
+        return _no_token("arcgis_request")
     p = dict(params or {})
     p.setdefault("f", "json")
     p["token"] = _token()
@@ -513,6 +521,8 @@ def _redact(s: str) -> str:
 def publish_layer(dataset_id: str, title: str = "", tags: str = "CSDI,Hong Kong") -> str:
     """Publish a loaded CSDI dataset to ArcGIS Online as a hosted feature layer.
     Needs ARCGIS_TOKEN. Returns itemId + the new service URL."""
+    if not _token():
+        return _no_token("publish_layer")
     tok = _token()
     src = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', dataset_id)}.geojson"
     if not src.exists():

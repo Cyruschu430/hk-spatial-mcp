@@ -1,30 +1,63 @@
 # hk-spatial-mcp
 
-![HK spatial map](preview.png)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
+[![Protocol](https://img.shields.io/badge/protocol-MCP-6f42c1.svg)](https://modelcontextprotocol.io)
 
-An **MCP server for Hong Kong CSDI spatial data** — any MCP-capable AI agent can search the whole
-Common Spatial Data Infrastructure catalogue (1,154 official datasets), pull the geometry, and turn it
-into a live interactive map, without writing fetch code or knowing the portal's quirks.
+![Hong Kong CSDI data on an interactive web map](preview.png)
 
-> **Unofficial, community project.** CSDI is operated by the Spatial Data Office, Development Bureau
-> (HKSAR Government). The Office has said it plans to develop its own CSDI MCP server in 2027 — this
-> repo is an independent implementation and claims no affiliation.
+An **MCP (Model Context Protocol) server for Hong Kong CSDI spatial data**. It gives any MCP-capable AI
+client the ability to search the entire Common Spatial Data Infrastructure catalogue, retrieve datasets
+as GeoJSON, and render them as an interactive web map — without writing HTTP code or knowing the
+portal's data-export conventions.
 
-Data is the point: **CSDI is the source of truth here**. The bundled web map is rendered with the
-ArcGIS Maps SDK (keyless public tiles, "Powered by Esri" attribution kept), and optional tools can
-publish to / read from ArcGIS Online — but nothing about the server requires ArcGIS to be useful.
+> **Unofficial, community project.** CSDI is operated by the Spatial Data Office, Development Bureau,
+> HKSAR Government. The Office has stated that it plans to develop its own CSDI MCP server in 2027.
+> This repository is an independent implementation and claims no affiliation with the Government, the
+> Spatial Data Office, or Esri.
 
-## What it gives an agent
+**Contents**
 
-1. **Search** the entire CSDI catalogue offline-cached, English or 繁體/简体, ranked.
-2. **Load** any dataset as GeoJSON (EPSG:4326) with a summary, not a wall of features.
-3. **Map** one or many datasets into an interactive web map served on localhost.
-4. *(optional)* **Talk to ArcGIS Online** — publish a dataset as a hosted feature layer, or call any
-   REST endpoint (item search, feature queries, GP jobs) with your own token.
+- [Capabilities](#capabilities)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Prompt cookbook](#prompt-cookbook)
+- [Tool reference](#tool-reference)
+- [Configuration](#configuration)
+- [Data source and coverage](#data-source-and-coverage)
+- [Design notes](#design-notes)
+- [Troubleshooting](#troubleshooting)
+- [Verification](#verification)
+- [Licensing and attribution](#licensing-and-attribution)
 
-## Install — any MCP client
+---
 
-Generic stdio server, no daemon, no service account. Add it to whatever MCP client you use:
+## Capabilities
+
+| Capability | Detail |
+|---|---|
+| **Catalogue search** | All 1,154 CSDI datasets, indexed locally and relevance-ranked. English, 繁體中文 and 简体中文 queries supported. |
+| **Data retrieval** | Any dataset as GeoJSON in EPSG:4326, returned as a summary (feature count, geometry types, attribute fields, bounding box) rather than a raw feature dump. |
+| **Map rendering** | One or many datasets rendered as an interactive web map (ArcGIS Maps SDK for JavaScript, keyless public basemap) served on `localhost`. |
+| **ArcGIS Online (optional)** | Publish a dataset as a hosted feature layer, or call any ArcGIS REST endpoint (item search, feature queries, geoprocessing jobs) with your own token. |
+
+The data layer is the primary value: CSDI is the source of truth. The map renderer is interchangeable,
+and the ArcGIS Online tools are optional extensions that require your own credentials.
+
+---
+
+## Requirements
+
+- Python 3.10 or newer, or [`uv`](https://docs.astral.sh/uv/) (recommended — `uvx` runs the server without a manual install)
+- An MCP-capable client (Claude Desktop, Cursor, WorkBuddy / CodeBuddy, Codex, Hermes, or any stdio MCP client)
+- Network access to `portal.csdi.gov.hk`
+- *Optional:* an ArcGIS Online user or OAuth token, needed only for the publishing and content tools
+
+---
+
+## Installation
+
+Add the server to your MCP client configuration:
 
 ```json
 {
@@ -32,108 +65,263 @@ Generic stdio server, no daemon, no service account. Add it to whatever MCP clie
     "hk-spatial": {
       "command": "uvx",
       "args": ["--from", "git+https://github.com/Cyruschu430/hk-spatial-mcp", "hk-spatial-mcp"],
-      "env": { "ARCGIS_TOKEN": "", "HK_MCP_PORT": "8777" }
+      "env": {
+        "ARCGIS_TOKEN": "",
+        "HK_MCP_PORT": "8777"
+      }
     }
   }
 }
 ```
 
-Where that file lives depends on the client — e.g.
-`~/Library/Application Support/Claude/claude_desktop_config.json` (Claude Desktop), `.cursor/mcp.json`
-(Cursor), `~/.workbuddy/mcp.json` (WorkBuddy / CodeBuddy), `~/.codex/config.toml` (Codex). Any client that
-speaks MCP over stdio works; the config shape above is the common one.
+Configuration file locations vary by client:
 
-Then in the chat:
-
-> 幫我搵香港郊野公園數據，出個 map 喺 preview 睇
-
-## Copy-paste prompts (30-second start)
-
-Paste any of these into your agent after the server shows a green/connected status.
-
-**1. Smoke test — does it work at all?**
-```
-用 hk-spatial 搜「郊野公園」，列返前 5 個 dataset 俾我睇。
-```
-
-**2. The 30-second demo — data → map → preview**
-```
-用 hk-spatial 搵香港郊野公園數據，載入之後出一個 web map，標題「HK Country Parks」，
-話我知 preview URL。
-```
-
-**3. Chinese query, single layer**
-```
-用 hk-spatial 搵全港公廁/洗手間嘅位置數據，出個 map。
-```
-
-**4. Multi-layer by theme (no dataset id needed)**
-```
-用 hk-spatial 一次過搵：電動車充電站、公立醫院、行人路網絡，全部放埋同一個 map，
-每層唔同顏色，圖例寫返個 dataset 名。
-```
-
-**5. Iterate on the same map**
-```
-用 hk-spatial 再加多層「巴士路線」落而家嗰個 map，加完話我知。
-```
-
-**6. Ask what exists before guessing**
-```
-用 hk-spatial 列出同「斜坡安全」有關嘅全部 dataset，逐個講一句係咩數據。
-```
-
-**7. Publish to ArcGIS Online** *(needs `ARCGIS_TOKEN`)*
-```
-用 hk-spatial 將郊野公園呢個 dataset publish 上我 ArcGIS Online，標題「HK Country Parks」，
-出 item link 俾我。
-```
-
-**8. Read your own org content** *(needs `ARCGIS_TOKEN`)*
-```
-用 hk-spatial 嘅 arcgis_request 搵我 ArcGIS Online 帳戶下面最近 5 個 feature layer，
-列返名同 item id。
-```
-
-**9. Make the agent always follow the loop** — load `SKILL.md` as the agent's skill / system prompt.
-It pins: search → load → build_map, never invent data, never paste features into the chat, keep
-"Powered by Esri".
-
-Tip: if the agent free-forms and starts writing its own `requests` code, tell it
-**"唔好自己寫 fetch code，用 hk-spatial 嘅 tool"** — the tools already handle the CSDI quirks
-(CSW search, GeoJSON export, EPSG:4326, 13 metadata-only datasets that 404 on export).
-
-## Tools
-
-| Tool | Does |
+| Client | Configuration file |
 |---|---|
-| `search_hk_data(keyword="", limit=10, offset=0)` | search **all ~1150 CSDI datasets** (English **or Chinese**, ranked). Empty keyword = browse |
-| `load_hk_data(dataset_id, name="")` | download dataset as GeoJSON (WGS84) → **summary** (count, fields, bbox, file path) |
-| `build_map(dataset_ids, title)` | build an interactive web map from the loaded datasets, served on `http://localhost:8777` |
-| `arcgis_request(path, params, method)` | any ArcGIS Online REST call with the token (search items, item data, feature queries, GP jobs) |
-| `publish_layer(dataset_id, title)` | upload GeoJSON to ArcGIS Online as a hosted feature layer → `itemId` + item URL |
+| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Cursor | `<project>/.cursor/mcp.json` |
+| WorkBuddy / CodeBuddy | `~/.workbuddy/mcp.json` or `<project>/.workbuddy/mcp.json` |
+| Codex | `~/.codex/config.toml` |
 
-`ARCGIS_TOKEN` is only needed for the last two. An ArcGIS **API key** covers basemaps/geocoding but cannot
-read or create org content — use a user/OAuth token.
+Any client that speaks MCP over stdio will work; the JSON shape above is the common form. Once the
+client reports the server as connected, the tools are available in the conversation.
 
-## Notes
-
-- **Coverage**: the whole CSDI catalogue (1154 datasets, verified 2026-10-22) is harvested in one
-  request and cached in the workspace for 7 days (`catalog.json`) — search runs offline over titles,
-  keywords and abstracts in English + 繁體 + 简体, so ranking is not limited to what a server-side
-  `AnyText` match returns. 13 metadata-only datasets have no GeoJSON export (`exportable: false`).
-- **Chinese queries** are expanded with Hong Kong wording (廁所 → 洗手間, 行人路 → pedestrian,
-  電動車 → electric vehicle charging, 巴士 → bus, 郊野公園 → country park, 斜坡安全 → slope, …).
-- **Big layers**: `file-api` returns the full dataset (Registered Man-made Slopes = 61,527 features /
-  153 MB). Layers over 3000 features are streamed from the served file instead of inlined into the
-  page, and >60 MB gets an explicit warning — the data is never silently sampled.
-- Basemap is keyless (Esri World Imagery tiles) with the SDK's own attribution — keep "Powered by Esri".
-- Data source: CSDI portal (`portal.csdi.gov.hk`), CSW 2.0.2 catalogue + `file-api` GeoJSON (EPSG:4326).
-  CSDI data is published by the HKSAR Government; check each dataset's licence before redistribution.
-- Workspace defaults to `./hk-spatial` (`HK_MCP_DIR`), preview port `HK_MCP_PORT` (default 8777).
-
-## Verify
+**Manual installation (without `uvx`)**
 
 ```bash
-python3 hk_spatial_mcp.py --selftest     # catalogue search + load + map + served page, asserts HK coords
+git clone https://github.com/Cyruschu430/hk-spatial-mcp
+cd hk-spatial-mcp
+pip install "mcp>=1.2"
+python3 hk_spatial_mcp.py          # stdio MCP server
 ```
+
+---
+
+## Prompt cookbook
+
+Ready-to-use instructions for an AI client. The English and Chinese versions are equivalent — use
+whichever suits your users; the underlying tool calls are identical.
+
+### 1. Connectivity check
+
+```
+Search the CSDI catalogue for "country park" using hk-spatial and list the first five datasets.
+```
+```
+用 hk-spatial 搜尋 CSDI 目錄中的「郊野公園」，列出前五個數據集。
+```
+
+### 2. Data to map (the core workflow)
+
+```
+Using hk-spatial, find the Hong Kong country parks dataset, load it, and build an interactive web map
+titled "HK Country Parks". Then report the preview URL.
+```
+```
+用 hk-spatial 找出香港郊野公園數據集，載入後建立一個標題為「HK Country Parks」的互動地圖，
+並回報預覽網址。
+```
+
+### 3. Chinese-language query, single layer
+
+```
+Using hk-spatial, find the location data for public toilets in Hong Kong and produce a map.
+```
+```
+用 hk-spatial 找出全港公廁的位置數據，並產生地圖。
+```
+
+### 4. Multiple layers in one map
+
+```
+Using hk-spatial, retrieve three datasets — electric vehicle chargers, public hospitals and the
+pedestrian network — and place them all on a single map with a distinct colour per layer and the
+dataset name shown in the legend.
+```
+```
+用 hk-spatial 同時取得三組數據：電動車充電站、公立醫院及行人路網絡，全部放在同一張地圖上，
+每層使用不同顏色，並在地圖圖例中標示數據集名稱。
+```
+
+### 5. Extending an existing map
+
+```
+Using hk-spatial, add the bus routes dataset to the map you just built and confirm when it is added.
+```
+```
+用 hk-spatial 在剛才建立的地圖上再加入「巴士路線」數據集，完成後通知我。
+```
+
+### 6. Catalogue reconnaissance before committing
+
+```
+Using hk-spatial, list every dataset related to slope safety and describe each one in a single sentence.
+```
+```
+用 hk-spatial 列出所有與斜坡安全相關的數據集，並為每個數據集提供一句說明。
+```
+
+### 7. Publish to ArcGIS Online *(requires `ARCGIS_TOKEN`)*
+
+```
+Using hk-spatial, publish the country parks dataset to my ArcGIS Online organisation as a hosted
+feature layer titled "HK Country Parks" and return the item link.
+```
+```
+用 hk-spatial 將郊野公園數據集發佈到我的 ArcGIS Online 組織，命名為「HK Country Parks」，
+並回報項目連結。
+```
+
+### 8. Query existing ArcGIS Online content *(requires `ARCGIS_TOKEN`)*
+
+```
+Using hk-spatial's arcgis_request tool, list the five most recent feature layers in my ArcGIS Online
+account together with their names and item IDs.
+```
+```
+用 hk-spatial 的 arcgis_request 工具，列出我 ArcGIS Online 帳戶中最近五個圖層服務的名稱與項目 ID。
+```
+
+### 9. Enforce the intended workflow
+
+Load `SKILL.md` as the agent's skill or system prompt. It constrains the agent to the
+search → load → build_map sequence, prohibits fabricating data, prohibits pasting feature records into
+the conversation, and requires the "Powered by Esri" attribution to be preserved.
+
+If the agent starts writing its own HTTP code, instruct it explicitly:
+
+```
+Do not write custom fetch code. Use the hk-spatial tools — they already handle CSDI's catalogue
+search, GeoJSON export, coordinate system and non-spatial datasets.
+```
+```
+請勿自行編寫抓取程式碼，改用 hk-spatial 工具；它已處理 CSDI 的目錄搜尋、GeoJSON 匯出、
+坐標系統及非空間數據集等細節。
+```
+
+---
+
+## Tool reference
+
+### `search_hk_data(keyword: str = "", limit: int = 10, offset: int = 0)`
+
+Searches all 1,154 CSDI datasets using the local index. Returns `dataset_id`, English and Chinese
+titles, publishing organisation, last update date, relevance score and an `exportable` flag.
+
+- Omitting `keyword` enumerates the catalogue; paginate with `offset`. `limit` is capped at 30.
+- English and Chinese queries are both supported; Hong Kong terminology is expanded automatically
+  (廁所 → 洗手間, 行人路 → pedestrian, 電動車 → electric vehicle charging, 斜坡安全 → slope).
+- When nothing matches locally, the tool falls back to the CSDI catalogue service for broader recall.
+
+### `load_hk_data(dataset_id: str, name: str = "")`
+
+Downloads a dataset as GeoJSON (EPSG:4326) into the workspace and returns a summary: feature count,
+geometry types, attribute field names, bounding box and file path. Feature records are never returned
+to the model.
+
+### `build_map(dataset_ids: list[str], title: str = "Hong Kong Spatial Data")`
+
+Builds an interactive map from the loaded datasets and serves it on `http://localhost:<HK_MCP_PORT>/`.
+Returns the URL, layer list, total feature count and warnings for oversized layers. Layers above 3,000
+features are streamed from the served file rather than inlined into the page.
+
+### `arcgis_request(path: str, params: dict | None = None, method: str = "GET")`
+
+Calls any ArcGIS REST endpoint with the configured token. The token is never echoed back in a response.
+
+```python
+arcgis_request("search", {"q": "owner:me", "num": 10})                      # find items
+arcgis_request("content/items/<itemId>/data")                               # item JSON
+arcgis_request("<featureServiceUrl>/0/query", {"where": "1=1", "returnCountOnly": "true"})
+```
+
+### `publish_layer(dataset_id: str, title: str = "", tags: str = "CSDI,Hong Kong")`
+
+Uploads a dataset to ArcGIS Online as a hosted feature layer and returns the `itemId` and item URL.
+Consumes organisation credits and storage capacity.
+
+**Authentication.** `arcgis_request` and `publish_layer` require `ARCGIS_TOKEN` set to a user or OAuth
+token. An ArcGIS API key is sufficient for basemaps and geocoding but cannot read or create
+organisation content.
+
+---
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HK_MCP_DIR` | `./hk-spatial` | Workspace for the catalogue cache, downloaded GeoJSON and the generated map |
+| `HK_MCP_PORT` | `8777` | Port for the local map preview server (bound to `127.0.0.1`) |
+| `ARCGIS_TOKEN` | *(empty)* | ArcGIS Online user/OAuth token; required only for the content and publishing tools |
+| `ARCGIS_URL` | `https://www.arcgis.com` | Portal base URL, for ArcGIS Enterprise deployments |
+
+---
+
+## Data source and coverage
+
+- **Source:** CSDI portal (`portal.csdi.gov.hk`) — CSW 2.0.2 catalogue service and the `file-api`
+  GeoJSON export endpoint.
+- **Coverage verified 2026-10-22:** 1,154 datasets from 70+ government departments and organisations.
+- **Caching:** the full catalogue is retrieved in a single request (~2 s, ~2.8 MB) and cached for seven
+  days as `catalog.json` in the workspace; searches then run offline.
+- **Non-spatial datasets:** 13 of the 1,154 have no GeoJSON export and are flagged `exportable: false`;
+  `load_hk_data` returns an explanatory error together with the metadata page link.
+- **Licensing:** each dataset carries its own terms. CSDI data is published by the HKSAR Government —
+  review the individual dataset's licence before redistribution or commercial use.
+
+---
+
+## Design notes
+
+- **Why a local index.** The catalogue service's `AnyText` query is high-recall but low-precision
+  (a Chinese query such as 廁所 returns 185 hits with irrelevant ranking). Indexing the full catalogue
+  locally allows field-weighted ranking across English, Traditional and Simplified Chinese metadata,
+  and removes a network round-trip from every search.
+- **Large datasets.** `file-api` returns complete datasets — for example Registered Man-made Slopes is
+  61,527 features (153 MB) and Building is 87,946 features (30 MB). Layers above 3,000 features are
+  streamed from the served file instead of embedded in the HTML, and layers above 60 MB produce an
+  explicit performance warning. Data is never silently sampled or truncated.
+- **Coordinate system.** All output is EPSG:4326. No reprojection is performed, and a Hong Kong
+  bounding-box assertion guards the pipeline against projection errors.
+- **Basemap.** Keyless Esri World Imagery tiles with the SDK's own attribution. Attribution is a
+  licensing requirement of the basemap — keep "Powered by Esri" visible if you adapt the template.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause and resolution |
+|---|---|
+| Client reports the server as disconnected | The process exited during start-up. Run `python3 hk_spatial_mcp.py` directly to see the traceback; the usual cause is a missing `mcp` package or Python older than 3.10. |
+| `ARCGIS_TOKEN not set` | Expected for the two ArcGIS Online tools. Set a user or OAuth token in the client's `env` block. |
+| `HTTP 404` on `load_hk_data` | The dataset has no GeoJSON export (13 of 1,154). Search again and use a result with `exportable: true`. |
+| The map does not refresh | The preview page must be reloaded after each `build_map` call. |
+| The map is slow or the browser stalls | The layer is very large. Use the `warn` output from `build_map` as a guide and prefer smaller or district-level datasets. |
+| Port 8777 is already in use | Set `HK_MCP_PORT` to a free port in the client's `env` block. |
+
+---
+
+## Verification
+
+```bash
+python3 hk_spatial_mcp.py --selftest
+```
+
+The self-test harvests the catalogue, asserts it contains more than 1,100 datasets, runs English and
+Chinese searches with expected top results, downloads a dataset, asserts Hong Kong coordinates, builds
+the map and confirms the page is served.
+
+Two integration tests exercise the MCP protocol over stdio:
+
+```bash
+python3 test_mcp_client.py       # against the local file
+python3 test_install_path.py     # against the published git URL — i.e. what users actually install
+```
+
+---
+
+## Licensing and attribution
+
+- Source code: MIT (see [LICENSE](LICENSE)).
+- CSDI data: © HKSAR Government, subject to each dataset's licence.
+- Basemap: Esri World Imagery, used under Esri's terms; "Powered by Esri" attribution retained.

@@ -10,7 +10,7 @@ No install needed to look: that page is the unmodified output of `build_map`, ex
 17 WSD impounding reservoirs and 53 AFCD country-park attractions on Esri imagery — pan, zoom and **click a
 feature to see every attribute field**.
 
-[![Hong Kong CSDI data on an interactive web map, with a feature's attributes shown](docs/demo-2d.png)](https://cyruschu430.github.io/hk-spatial-mcp/)
+[![Hong Kong CSDI data on an interactive web map, with a feature's attributes shown](docs/demo-2d.jpg)](https://cyruschu430.github.io/hk-spatial-mcp/)
 
 *(Above: a reservoir selected in a real client — the attribute card is built by the server's click handler, not
 by a third-party popup library. Fields: `OBJECTID`, `INSTALLATION_ID`, `NAME`, `CHINESE_NAME`, `LOCATION`,

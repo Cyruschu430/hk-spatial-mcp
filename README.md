@@ -93,6 +93,11 @@ Configuration file locations vary by client:
 Any client that speaks MCP over stdio will work; the JSON shape above is the common form. Once the
 client reports the server as connected, the tools are available in the conversation.
 
+**Windows note.** `uvx --from git+…` needs `git` on `PATH`. Set `HK_MCP_DIR` to an absolute path
+(for example `C:\\Users\\you\\hk-spatial`) — the default `./hk-spatial` is relative to whatever working
+directory the client happens to launch with. Maps are served on `http://localhost:<HK_MCP_PORT>/`, so
+open that URL in your own browser.
+
 **Manual installation (without `uvx`)**
 
 ```bash

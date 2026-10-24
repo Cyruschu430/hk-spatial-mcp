@@ -499,13 +499,12 @@ def geocode_address(single_line: str = "", max_results: int = 5,
     cands = [{"address": c.get("address"), "lon": (c.get("location") or {}).get("x"),
               "lat": (c.get("location") or {}).get("y"), "score": c.get("score")}
              for c in raw.get("candidates") or []]
-    seen, unique = set(), []
-    for c in cands:  # the same place comes back twice with slightly different labels
-        key = (round(c["lon"] or 0, 5), round(c["lat"] or 0, 5), c["score"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(c)
-    cands = unique
+    by_place: dict = {}
+    for c in cands:  # the same place comes back twice with different labels and a tied score
+        key = (round(c["lon"] or 0, 4), round(c["lat"] or 0, 4))
+        if key not in by_place or (c["score"] or 0) > (by_place[key]["score"] or 0):
+            by_place[key] = c
+    cands = list(by_place.values())
     if not cands:
         return json.dumps({"query": single_line, "candidates": [],
                            "note": "no candidate — try a fuller address, or romanised HK place names"})
@@ -840,6 +839,156 @@ def summarise_hk_data(dataset_id: str, group_by: str = "", value_field: str = ""
                        "basis": f"{len(feats)} features from the local cache"}, ensure_ascii=False)
 
 
+def _poly_parts(geom):
+    """Polygon/MultiPolygon -> (list of parts, bbox). A part is a list of linear rings (holes)."""
+    t = (geom or {}).get("type")
+    if t == "Polygon":
+        parts = [geom.get("coordinates") or []]
+    elif t == "MultiPolygon":
+        parts = list(geom.get("coordinates") or [])
+    else:
+        return [], None
+    parts = [p for p in parts if p and p[0]]
+    pts = [xy for p in parts for ring in p for xy in p[0]]
+    if not pts:
+        return [], None
+    bbox = (min(q[0] for q in pts), min(q[1] for q in pts),
+            max(q[0] for q in pts), max(q[1] for q in pts))
+    return parts, bbox
+
+
+BINS = 64  # ponytail: fixed y-buckets; enough for district-sized polygons, rebuild per shape
+
+
+def _index_part(rings, y0: float, y1: float):
+    """Bucket the ring segments by y so a point only tests the segments that can cross its row."""
+    scale = BINS / ((y1 - y0) or 1.0)
+    bins: list = [[] for _ in range(BINS)]
+    for ring in rings:
+        for k in range(len(ring) - 1):
+            x1, y1s = ring[k][0], ring[k][1]
+            x2, y2s = ring[k + 1][0], ring[k + 1][1]
+            lo = int((min(y1s, y2s) - y0) * scale)
+            hi = int((max(y1s, y2s) - y0) * scale)
+            lo = 0 if lo < 0 else BINS - 1 if lo >= BINS else lo
+            hi = 0 if hi < 0 else BINS - 1 if hi >= BINS else hi
+            seg = (x1, y1s, x2, y2s)
+            for b in range(lo, hi + 1):
+                bins[b].append(seg)
+    return bins, y0, scale
+
+
+def _pip(x: float, y: float, indexed) -> bool:
+    """Even-odd point-in-polygon over one part; holes fall out of the parity rule."""
+    bins, y0, scale = indexed
+    b = int((y - y0) * scale)
+    if b < 0 or b >= BINS:
+        return False
+    inside = False
+    for x1, y1s, x2, y2s in bins[b]:
+        if (y1s > y) != (y2s > y):
+            if x < x1 + (y - y1s) * (x2 - x1) / (y2s - y1s):
+                inside = not inside
+    return inside
+
+
+def spatial_join(points_dataset: str, polygons_dataset: str, field: str = "",
+                 top: int = 20) -> str:
+    """Count the points of one dataset inside each polygon of another — the join summarise cannot do.
+
+    Both datasets must already be loaded with load_hk_data(). `field` is the polygon attribute to
+    label rows by (e.g. "dc_eng"); leave it empty and the first text-like field is used.
+    Point-in-polygon runs locally in pure Python — no geometry service, no credential, nothing
+    leaves the machine. Answers "which district has the most of these" in one call.
+    """
+    pts, err = _cached_features(points_dataset)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+    polys, err = _cached_features(polygons_dataset)
+    if err:
+        return json.dumps(err, ensure_ascii=False)
+
+    prop_sets = [f.get("properties") or {} for f in polys]
+
+    def _label_rank(k):
+        """Text-like, name-looking fields first. No guessing: the caller still picks one."""
+        values = {str(r.get(k)) for r in prop_sets}
+        hint = bool(re.search(r"name|district|region|area|zone|label|title|_chi|_eng|^dc_",
+                             k, re.I))
+        return (all(_num(v) is not None for v in values), not hint, k)
+
+    candidates = sorted(((k, len({str(r.get(k)) for r in prop_sets}))
+                         for k in (prop_sets[0] if prop_sets else {})
+                         if 2 <= len({str(r.get(k)) for r in prop_sets}) <= 60
+                         and not all(str(r.get(k)).startswith("http") for r in prop_sets)),
+                        key=lambda kv: _label_rank(kv[0]))
+    label_field = field
+    field_names = [c[0] for c in candidates[:12]] or list((prop_sets[0] if prop_sets else {}))[:12]
+    if not field:  # no guessing: same overview-then-call-again pattern as summarise_hk_data
+        return json.dumps({
+            "polygons_dataset": polygons_dataset, "points_dataset": points_dataset,
+            "polygons": len(polys), "points": len(pts),
+            "label_fields": field_names,
+            "hint": "call again with field=<one of label_fields> to count the points per polygon",
+        }, ensure_ascii=False)
+    if field not in (prop_sets[0] if prop_sets else {}):
+        return json.dumps({"error": f"{polygons_dataset}: no field {field!r}",
+                           "label_fields": field_names}, ensure_ascii=False)
+
+    shapes, skipped_shapes = [], 0
+    for i, f in enumerate(polys):
+        parts, bbox = _poly_parts(f.get("geometry"))
+        if not parts:
+            skipped_shapes += 1
+            continue
+        props = f.get("properties") or {}
+        label = str(props.get(label_field) or f"polygon {i + 1}") if label_field else f"polygon {i + 1}"
+        shapes.append({"label": label, "bbox": bbox,
+                       "indexed": [_index_part(p, bbox[1], bbox[3]) for p in parts], "n": 0})
+    if not shapes:
+        return json.dumps({"error": f"{polygons_dataset}: no Polygon/MultiPolygon features"},
+                          ensure_ascii=False)
+
+    matched = unmatched = skipped_pts = 0
+    for f in pts:
+        g = f.get("geometry") or {}
+        if g.get("type") != "Point" or not g.get("coordinates"):
+            skipped_pts += 1
+            continue
+        x, y = g["coordinates"][0], g["coordinates"][1]
+        hit = False
+        for s in shapes:  # bbox reject first: without it this is every segment for every point
+            x0, y0, x1, y1 = s["bbox"]
+            if not (x0 <= x <= x1 and y0 <= y <= y1):
+                continue
+            if any(_pip(x, y, part) for part in s["indexed"]):
+                s["n"] += 1
+                hit = True
+                break  # first polygon wins; districts and constituencies do not overlap
+        if hit:
+            matched += 1
+        else:
+            unmatched += 1
+
+    rows = sorted(({"group": s["label"], "count": s["n"]} for s in shapes), key=lambda r: -r["count"])
+    rows = rows[:max(1, int(top))]
+    w = min(28, max([len(r["group"]) for r in rows] + [len("group")]))
+    table = [f"{'group':<{w}}  {'points':>18}", "-" * (w + 20)]
+    for r in rows:
+        table.append(f"{r['group'][:w]:<{w}}  {r['count']:>18,}")
+    chart_url = _chart_page(f"{points_dataset} in {polygons_dataset} — points per polygon", rows, w)
+    return json.dumps({
+        "points_dataset": points_dataset, "polygons_dataset": polygons_dataset,
+        "label_field": label_field, "label_fields": field_names,
+        "polygons": len(shapes), "points": len(pts),
+        "matched": matched, "unmatched": unmatched,
+        "rows": rows, "table": "\n".join(table), "chart_url": chart_url,
+        "skipped": {"non_polygon_features": skipped_shapes, "non_point_features": skipped_pts},
+        "note": "pure-Python point-in-polygon, y-bucketed segments, bbox prefilter; "
+                "first matching polygon wins",
+    }, ensure_ascii=False)
+
+
 def _chart_page(title: str, rows, width_chars: int) -> str:
     """One SVG bar chart page, no dependency. ponytail: bars only — swap in a chart lib when a
     client needs more than one chart type."""
@@ -865,7 +1014,8 @@ def _chart_page(title: str, rows, width_chars: int) -> str:
            f'<text x="{pad}" y="{pad + 14}" fill="#eaf0f7" font-size="15" font-weight="600">'
            f'{_esc(title)[:78]}{"…" if len(_esc(title)) > 78 else ""}</text>'
            + "".join(bars) + "</svg>")
-    html = ("<!doctype html><meta charset=utf-8><title>" + _esc(title) + "</title>"
+    html = ("<!doctype html><meta charset=utf-8><link rel=\"icon\" href=\"data:,\"><title>"
+            + _esc(title) + "</title>"
             "<body style='margin:0;background:#0b1018;color:#eaf0f7;"
             "font:13px/1.5 ui-sans-serif,system-ui,sans-serif'>"
             f"<div style='padding:22px'>{svg}"
@@ -1157,7 +1307,7 @@ def main():
     mcp = Server("hk-spatial")
     for fn in (search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
                geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
-               arcgis_request, publish_layer, dataset_status):
+               arcgis_request, publish_layer, dataset_status, spatial_join):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":
@@ -1242,6 +1392,16 @@ if __name__ == "__main__":
         assert s.get("features", 0) > 0, s
         lo, la = s["bbox"][0], s["bbox"][1]
         assert 113.8 < lo < 114.5 and 22.1 < la < 22.6, f"projection drift: {s['bbox']}"
+        # spatial join: counts must add up, and the overview must not guess a label field
+        districts = "censtatd_rcd_1635932856094_19982"  # 18 district polygons
+        ov = json.loads(spatial_join("epd_rcd_1631080339740_69941", districts))
+        assert ov.get("label_fields") and ov.get("hint"), ov
+        jn = json.loads(spatial_join("epd_rcd_1631080339740_69941", districts, "dc_eng"))
+        assert jn["points"] == 989 and jn["matched"] + jn["unmatched"] == jn["points"], jn
+        assert jn["matched"] >= 980, f"join matched only {jn['matched']} of {jn['points']}"
+        assert sum(r["count"] for r in jn["rows"]) == jn["matched"], jn["rows"]
+        print(f"  join        -> {jn['points']} points, {jn['matched']} inside "
+              f"{jn['polygons']} polygons, chart {'yes' if jn.get('chart_url') else 'no'}")
         out = json.loads(build_map([hits[0]["dataset_id"]], "Selftest"))
         assert out.get("url"), out
         page = _http(out["url"]).decode()

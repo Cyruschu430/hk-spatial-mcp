@@ -82,6 +82,7 @@ m.build_scene([res], 'Hong Kong Impounding Reservoirs', 'imagery', tilt=65)"
 | **Data retrieval** | Any dataset as GeoJSON in EPSG:4326, returned as a summary (feature count, geometry types, attribute fields, bounding box) rather than a raw feature dump. |
 | **Map rendering** | One or many datasets rendered as an interactive **2D map** or **3D scene** (ArcGIS Maps SDK for JavaScript, keyless public basemap; 3D adds Terrain3D relief), served on `localhost`. |
 | **Feature inspection** | Click any feature to open an attribute card — every field from the dataset, bilingual column names where CSDI provides them, URLs rendered as links. |
+| **Spatial join** | `spatial_join` counts points inside polygons from two loaded datasets — "which district has the most of these" — with a pure-Python point-in-polygon test, no geometry service. |
 | **Answers, not just maps** | `summarise_hk_data` answers a question in text — counts, sums or averages grouped by any field — and renders a bar chart page. `query_hk_data` returns a few individual rows so a single value can be checked. |
 | **Printable static map** | `export_static_svg` writes a vector map **with the data drawn** — basemap tiles plus the features as real shapes — ready to print to PDF from a browser. |
 | **Geocoding and geometry** | Address ↔ coordinate (both directions), project / buffer / simplify on any GeoJSON geometry, ground elevation, via Esri's public services. No key required. |
@@ -357,6 +358,31 @@ Sha Tin                                874
 ...
 ```
 
+### `spatial_join(points_dataset, polygons_dataset, field="", top=20)`
+
+Counts the points of one loaded dataset inside each polygon of another — the join `summarise_hk_data`
+cannot do, answered locally with a ray-casting test in pure Python (no geometry service, no credential,
+no data leaving the machine).
+
+Both datasets must already be loaded with `load_hk_data()`. Call once with `field=""` to get the
+polygon's candidate label fields, then again with one of them:
+
+```text
+spatial_join("cedd_rcd_1640249280153_17521", "censtatd_rcd_1635932856094_19982", "dc_eng")
+
+group                            points
+---------------------------------------
+Islands                           1,475
+Sai Kung                          1,157
+Sha Tin                           1,123
+...
+```
+
+10,854 landslide points against 18 district polygons: 10,850 matched, 4 fell outside every district,
+**1.2 s** on a 2 vCPU VPS. A y-bucketed segment index keeps that down — a naive scan of the same pair
+takes 54 s. Returns per-polygon counts, the aligned table, a `chart_url`, `matched` / `unmatched` and
+the features it had to skip (non-point inputs).
+
 ### `query_hk_data(dataset_id, where="", fields="", limit=5)`
 
 Returns a few individual features so one value can be verified without opening the GeoJSON file. `where`
@@ -592,11 +618,12 @@ Measured on a 2 vCPU / 3.5 GB VPS with a warm catalogue cache:
 
 | Step | Time |
 |---|---|
-| `search_hk_data` (local index) | 10–20 ms |
+| `search_hk_data` (local index) | 11.6 ms median, 16.8 ms multi-term (measured independently, 2026-10-23) |
 | `load_hk_data`, first download (small dataset) | 0.3 s |
 | `load_hk_data`, first download (87,946 features / 30 MB) | 14 s |
 | `load_hk_data`, cache hit (same layer) | 0.3 s — the file is reused; `refresh=True` re-downloads |
-| `build_map` / `build_scene` (any layer count) | under 25 ms — it writes HTML, the browser does the rest |
+| `build_map` / `build_scene`, 17 features | 24 ms — it writes HTML, the browser does the rest |
+| `build_map`, 10,854 features | 47 ms (measured independently, 2026-10-23) |
 | 2D page until `view.when()` resolves (headless Chrome, 3 layers, no GPU) | 2.8 s, 250 requests |
 | Whole flow in a real client (DeepSeek Harness: search → summarise → map → click a feature) | ~2 min wall clock, dominated by model thinking |
 

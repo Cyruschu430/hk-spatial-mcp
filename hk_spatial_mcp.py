@@ -45,9 +45,20 @@ CSW_ALL = """<?xml version="1.0"?><csw:GetRecords service="CSW" version="2.0.2" 
 
 
 def _http(url, data=None, headers=None, timeout=60):
-    req = urllib.request.Request(url, data=data, headers=headers or {})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    # ponytail: one retry on 5xx. The public Esri services return a transient 500 now and then
+    # (observed on MapServer/export); a second attempt is cheaper than teaching every caller to retry.
+    last = None
+    for attempt in (1, 2):
+        req = urllib.request.Request(url, data=data, headers=headers or {})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code < 500 or attempt == 2:
+                raise
+            time.sleep(1.5)
+    raise last
 
 
 # ---------------------------------------------------------------- CSDI catalogue
@@ -1118,9 +1129,17 @@ LAYERS.forEach((L, i) => {
 });
 
 await view.when();
-for (const lyr of map.layers.toArray().slice(1)) {
-  const ext = lyr.fullExtent;
-  if (ext && isFinite(ext.xmin)) { view.goTo(ext); break; }
+// ponytail: basemap + labels are TileLayers too, so index-based skipping goes to the world extent;
+// filter by layer type and wait for the GeoJSON layers to finish loading before reading fullExtent.
+await Promise.allSettled(map.layers.toArray().map(l => l.when()));
+const ext = map.layers.toArray()
+  .filter(l => l.type === "geojson")
+  .map(l => l.fullExtent)
+  .filter(e => e && isFinite(e.xmin) && isFinite(e.ymax) && (e.xmax - e.xmin) < 180);
+if (ext.length) {
+  view.goTo({ xmin: Math.min(...ext.map(e => e.xmin)), ymin: Math.min(...ext.map(e => e.ymin)),
+              xmax: Math.max(...ext.map(e => e.xmax)), ymax: Math.max(...ext.map(e => e.ymax)),
+              spatialReference: ext[0].spatialReference });
 }
 </script>
 </body>

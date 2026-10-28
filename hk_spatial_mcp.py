@@ -1615,8 +1615,9 @@ def site_zoning(lat: float = 0.0, lon: float = 0.0, source: str = "", radius_m: 
             continue
         seen.add(key)
         zrows.append({"plan_no": z.get("PLAN_NO"), "zone": z.get("ZONE_LABEL"),
-                      "desc": z.get("DESC_ENG"),
-                      "permitted_use": (z.get("SPUSE_ENG") or "")[:200]})
+                      "desc": (z.get("DESC_ENG") or "").strip(),
+                      "desc_cn": (z.get("DESC_CHT") or "").strip(),
+                      "permitted_use": (z.get("SPUSE_ENG") or "").strip()[:200]})
 
     bhc = _hk_query(HK_BHC, bbox, "PLAN_NO,BHC_TYPE,BHC_VALUE")
     hrows = []

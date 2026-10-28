@@ -8,7 +8,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 HERE = pathlib.Path(__file__).resolve().parent
-EXPECTED = {"search_hk_data", "load_hk_data", "query_hk_data", "summarise_hk_data", "build_map", "build_scene",
+EXPECTED = {"bim_findings", "bim_report", "publish_findings", "search_hk_data", "load_hk_data", "query_hk_data", "summarise_hk_data", "build_map", "build_scene",
             "geocode_address",
             "geometry_op", "elevation_at", "export_static_map", "export_static_svg", "arcgis_request",
             "publish_layer", "dataset_status", "spatial_join",

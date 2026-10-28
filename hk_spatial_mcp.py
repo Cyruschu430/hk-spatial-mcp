@@ -1022,6 +1022,7 @@ def _chart_page(title: str, rows, width_chars: int) -> str:
             "<p style='color:#5f7185;font-size:11px'>Data: CSDI portal.csdi.gov.hk · "
             "Powered by Esri</p></div>")
     name = f"chart-{_slug(title, [len(rows)])}.html"
+    WORK.mkdir(parents=True, exist_ok=True)   # chart-first calls must not die on a cold WORK
     (WORK / name).write_text(html, encoding="utf-8")
     (WORK / "chart.html").write_text(html, encoding="utf-8")
     _serve()
@@ -1690,8 +1691,18 @@ def _print_pdf(html_path, pdf_path, timeout=120):
     """Chromium headless print. Returns the pdf path, or None when no browser is available."""
     import shutil
     import subprocess
-    for exe in ("chromium-browser", "chromium", "google-chrome", "chrome"):
-        if not shutil.which(exe):
+    cands = [shutil.which(e) for e in ("chromium-browser", "chromium", "google-chrome", "chrome")]
+    # Windows: browsers install to fixed dirs, not PATH — Edge ships with the OS, so this is the
+    # difference between "no PDF on every colleague machine" and "PDF everywhere".
+    for env, tail in (("ProgramFiles", r"Google\Chrome\Application\chrome.exe"),
+                      ("ProgramFiles(x86)", r"Google\Chrome\Application\chrome.exe"),
+                      ("ProgramFiles", r"Microsoft\Edge\Application\msedge.exe"),
+                      ("ProgramFiles(x86)", r"Microsoft\Edge\Application\msedge.exe")):
+        base = os.environ.get(env)
+        if base:
+            cands.append(str(pathlib.Path(base) / tail))
+    for exe in cands:
+        if not exe or not pathlib.Path(exe).exists():
             continue
         try:
             subprocess.run([exe, "--headless", "--no-sandbox", "--disable-gpu",
@@ -2238,7 +2249,8 @@ if __name__ == "__main__":
         print(f"  query       -> {q['matched']} matched, {q['returned']} returned, capped at {q['capped_at']}")
         agg = json.loads(summarise_hk_data("epd_rcd_1631080339740_69941",
                                            "NAME_OF_DISTRICT_COUNCIL_DISTRICT_EN", "", "count", 50))
-        assert sum(r["count"] for r in agg["rows"]) == 989, agg["rows"]
+        # EPD 廢物回收點數量會變（989 → 990 seen 2026-10-28）；只鎖不變量，唔好鎖實數
+        assert 900 <= sum(r["count"] for r in agg["rows"]) <= 1100, agg["rows"]
         assert "chart-" in agg["chart_url"], agg["chart_url"]
         assert "<svg" in _http(agg["chart_url"]).decode(), "chart page not served"
         print(f"  summarise   -> {len(agg['rows'])} groups, {agg['rows'][0]['count']} max, chart served")
@@ -2260,7 +2272,7 @@ if __name__ == "__main__":
         ov = json.loads(spatial_join("epd_rcd_1631080339740_69941", districts))
         assert ov.get("label_fields") and ov.get("hint"), ov
         jn = json.loads(spatial_join("epd_rcd_1631080339740_69941", districts, "dc_eng"))
-        assert jn["points"] == 989 and jn["matched"] + jn["unmatched"] == jn["points"], jn
+        assert 900 <= jn["points"] <= 1100 and jn["matched"] + jn["unmatched"] == jn["points"], jn
         assert jn["matched"] >= 980, f"join matched only {jn['matched']} of {jn['points']}"
         assert sum(r["count"] for r in jn["rows"]) == jn["matched"], jn["rows"]
         print(f"  join        -> {jn['points']} points, {jn['matched']} inside "

@@ -1945,13 +1945,24 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
     legend = "".join(f'<li><span class="sw {k}"></span>{k} · {v}</li>' for k, v in counts.items())
     css = "".join(f".sw.{k}{{background:{c}}}" for k, c in colours)
     if mode == "scene":
+        lons = [f["geometry"]["coordinates"][0] for f in gj["features"]]
+        lats = [f["geometry"]["coordinates"][1] for f in gj["features"]]
+        if lons:
+            cx, cy = (min(lons) + max(lons)) / 2, (min(lats) + max(lats)) / 2
+            span_m = max((max(lats) - min(lats)) * 111320,
+                         (max(lons) - min(lons)) * 111320 * math.cos(math.radians(cy)), 30)
+        else:
+            cx, cy, span_m = 114.17, 22.32, 200
         page.write_text(_SCENE_PAGE.format(
             title="BIM Findings — 3D", data_url=f"{slug}.geojson",
             service=service, legend=legend, css=css,
+            cam_lon=round(cx, 6), cam_lat=round(cy, 6),
+            xmin=round(min(lons), 6), ymin=round(min(lats), 6),
+            xmax=round(max(lons), 6), ymax=round(max(lats), 6),
             symbols="".join(
                 f'{{ value: "{k}", symbol: {{ type: "point-3d", symbolLayers: [{{ type: "object", '
                 f'resource: {{ primitive: "cylinder" }}, material: {{ color: "{c}" }}, '
-                f'height: 22, width: 3, anchor: "bottom" }}] }} }},'
+                f'height: 12, width: 2.4, anchor: "bottom" }}] }} }},'
                 for k, c in colours)))
     else:
         page.write_text(_FINDINGS_PAGE.format(
@@ -1994,50 +2005,66 @@ _SCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}
  #panel ul {{ list-style:none; margin:0; padding:0; }}
  #panel li {{ margin:3px 0; }}
  .sw {{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }}
- #hint {{ position:absolute; left:14px; bottom:14px; z-index:9; background:rgba(26,54,93,.9); color:#fff;
+ #hint {{ position:absolute; left:14px; bottom:34px; z-index:9; background:rgba(26,54,93,.9); color:#fff;
    padding:8px 12px; border-radius:4px; font-size:11px; }}
+ #msg {{ position:absolute; left:14px; top:14px; z-index:9; background:rgba(0,0,0,.65); color:#fff;
+   padding:6px 10px; border-radius:4px; font-size:11px; }}
 {css}
 </style></head><body>
 <div id="view"></div>
 <div id="panel"><h4>BIM FINDINGS · 3D</h4><ul>{legend}</ul>
-<div style="margin-top:8px;color:#c53030;font-size:11px">柱高 22 m，僅作定位提示，非實際構件</div>
+<div style="margin-top:8px;color:#c53030;font-size:11px">柱高 12 m，僅作定位提示，非實際構件</div>
 <div style="margin-top:6px;color:#4a5568">Powered by Esri</div></div>
 <div id="hint">拖曳旋轉 · 滾輪縮放 · 右鍵平移</div>
+<div id="msg">載入中…</div>
 <script src="https://js.arcgis.com/4.31/"></script>
 <script>
 require(["esri/Map","esri/views/SceneView","esri/layers/BuildingSceneLayer","esri/layers/SceneLayer",
-         "esri/layers/GeoJSONLayer"],
-function(Map, SceneView, BuildingSceneLayer, SceneLayer, GeoJSONLayer) {{
-  const url = "{service}";
-  const findings = new GeoJSONLayer({{
-    url: new URL("{data_url}", window.location.href).href,
-    title: "Findings",
-    elevationInfo: {{ mode: "on-the-ground" }},
-    popupTemplate: {{
-      title: "{{finding}}",
-      content: "{{detail}}<br/>Category: {{Category}}<br/>Type: {{FamilyType}}<br/>Level: {{BldgLevel}}<br/>Mark: {{Mark}}"
-    }},
-    renderer: {{ type: "unique-value", field: "finding", uniqueValueInfos: [{symbols}] }}
-  }});
-  const map = new Map({{ basemap: "satellite", ground: "world-elevation", layers: [findings] }});
+         "esri/layers/GraphicsLayer","esri/Graphic","esri/PopupTemplate"],
+function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic, PopupTemplate) {{
+  const msg = document.getElementById("msg");
+  const COLOURS = {{ duplicate_mark: "#c53030", no_dimension: "#b7791f", slab_coverage: "#2b6cb0" }};
+  const gLayer = new GraphicsLayer({{ title: "Findings" }});
+  const map = new Map({{ basemap: "satellite", ground: "world-elevation", layers: [gLayer] }});
+  const TARGET = {{ type: "extent", xmin: {xmin}, ymin: {ymin}, xmax: {xmax}, ymax: {ymax},
+                    spatialReference: {{ wkid: 4326 }} }};
   const view = new SceneView({{ container: "view", map: map,
-    camera: {{ position: {{ latitude: 34.0587, longitude: -117.1974, z: 900 }}, tilt: 65 }} }});
+    camera: {{ position: {{ latitude: {cam_lat}, longitude: {cam_lon}, z: 600 }}, tilt: 62 }} }});
 
-  // A Building Scene Layer needs BuildingSceneLayer; a 3D object layer needs SceneLayer.
-  // Try the richer one first and swap on failure — no server-side detection needed.
-  const bim = new BuildingSceneLayer({{ url: url, title: "BIM model", popupEnabled: false }});
-  map.add(bim);
+  // BIM first, so it draws under the markers
+  const bim = new BuildingSceneLayer({{ url: "{service}", title: "BIM model" }});
+  map.add(bim, 0);
   bim.load().then(() => {{
     window.__layerKind = "BuildingSceneLayer";
-    if (bim.fullExtent) view.goTo({{ target: bim.fullExtent, tilt: 65 }}, {{ animate: false }});
+    msg.textContent = "BIM: " + (bim.sublayers ? bim.sublayers.length : 0) + " sublayers";
+    view.goTo({{ target: TARGET, tilt: 62 }}, {{ animate: false }});
   }}).catch(() => {{
     map.remove(bim);
-    const alt = new SceneLayer({{ url: url, title: "BIM model", popupEnabled: false }});
-    map.add(alt);
-    alt.load().then(() => {{
-      window.__layerKind = "SceneLayer";
-      if (alt.fullExtent) view.goTo({{ target: alt.fullExtent, tilt: 65 }}, {{ animate: false }});
-    }}).catch(() => {{ window.__layerKind = "failed"; }});
+    const alt = new SceneLayer({{ url: "{service}", title: "BIM model" }});
+    map.add(alt, 0);
+    alt.load().then(() => {{ window.__layerKind = "SceneLayer"; msg.textContent = "BIM: scene layer";
+      view.goTo({{ target: TARGET, tilt: 62 }}, {{ animate: false }}); }})
+      .catch(() => {{ window.__layerKind = "failed"; msg.textContent = "BIM 載入失敗"; }});
+  }});
+
+  fetch("{data_url}").then(r => r.json()).then(gj => {{
+    let n = 0;
+    for (const f of gj.features) {{
+      const pr = f.properties, c = COLOURS[pr.finding] || "#7f7f7f";
+      gLayer.add(new Graphic({{
+        geometry: {{ type: "point", longitude: f.geometry.coordinates[0], latitude: f.geometry.coordinates[1] }},
+        symbol: {{ type: "point-3d", symbolLayers: [{{ type: "object",
+          resource: {{ primitive: "cylinder" }}, material: {{ color: c }},
+          height: 12, width: 2.4, anchor: "bottom" }}] }},
+        attributes: pr,
+        popupTemplate: {{ title: pr.finding,
+          content: pr.detail + "<br/>Category: " + pr.Category + "<br/>Type: " + pr.FamilyType +
+                   "<br/>Level: " + pr.BldgLevel + "<br/>Mark: " + pr.Mark }}
+      }}));
+      n++;
+    }}
+    window.__findings = n;
+    msg.textContent += " · findings " + n;
   }});
 
   window.__ready = false;

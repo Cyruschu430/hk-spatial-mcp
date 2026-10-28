@@ -5,6 +5,12 @@
 3. tool failures must return structured {"error": ...} JSON, not the masked
    'Error executing tool X' protocol exception from the mcp 2.x server
 4. build_map must accept a bare comma-joined dataset_ids string (not just a JSON-array string)
+5. Scene Package (.slpk) item ids must read end-to-end (zip backend, both i3s layouts)
+6. multi-sublayer merge must cover every discipline sublayer and exclude the duplicate
+   'Overview' copy (GrandCentral: 9 real sublayers, 6,919 elements, exactly 757 Walls —
+   the same count agol-bim-mcp reports)
+7. the where grammar: AND / NOT / LIKE / IN / IS NULL / bare word
+8. bad filters return where_parse; zero matches return field_values hints
 
 Hermetic: HK_MCP_DIR goes to a temp dir, the preview server to a non-default port.
 """
@@ -22,6 +28,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 MEINAU = ("https://tiles.arcgis.com/tiles/PD34KSBxbKxXBglp/arcgis/rest/services/"
           "BIM_STRUCTURE_PROJET_MEINAU_WM_v3/SceneServer")  # plain 3DObject layer, 0 sublayers
 ZCB_ITEM = "5275b4eda9a441d28b9b04925fbbf7b2"                # Zero Carbon Building (BSL, item id)
+GC_ITEM = "5ced7f09314e45578d1212d005ff3b19"                 # GrandCentral_V2 Scene Package (.slpk)
 EV = "epd_rcd_1631080339740_69941"                           # 990 EV chargers (points)
 DIST = "had_rcd_1634523272907_75218"                         # 18 district boundaries (polygons)
 
@@ -74,6 +81,35 @@ async def main():
             assert "error" not in mp, mp
             assert len(mp["layers"]) == 2 and mp["features"] > 1000, mp
             print(f"4 csv ids    : {len(mp['layers'])} layers, {mp['features']} features")
+
+            # 5+6. Scene Package end-to-end: zip backend, discipline merge, Overview excluded.
+            # agol-bim-mcp reports 757 Walls for this same package — parity is the assertion.
+            w = await call("bim_elements", {"source": GC_ITEM, "where": "Category=Walls", "limit": 2})
+            assert "error" not in w, w
+            assert w["matched"] == 757, w["matched"]
+            print(f"5 slpk       : GrandCentral .slpk, {w['matched']} Walls (agol-bim-mcp parity)")
+            a = await call("bim_audit", {"source": GC_ITEM})
+            assert "error" not in a, a
+            assert a["sublayers"] == 9 and a["elements"] == 6919, (a["sublayers"], a["elements"])
+            print(f"6 merge      : {a['elements']} elements across {a['sublayers']} discipline sublayers")
+
+            # 7. where grammar (counts verified against agol-bim-mcp / direct runs)
+            expect = {"Category=Walls AND BldgLevel=20": 8, "BldgLevel IN (10, 20)": 78,
+                      "Family LIKE 'Basic%'": 757, "NOT Category=Floors": 6411,
+                      "BldgLevel_Desc IS NULL": 3, "Stairs": 44}
+            for where, n in expect.items():
+                r = await call("bim_elements", {"source": GC_ITEM, "where": where, "limit": 1})
+                assert r.get("matched") == n, (where, r.get("matched"), n)
+            print(f"7 where      : {len(expect)} grammar forms, all counts exact")
+
+            # 8. filter ergonomics: parse errors and zero-match hints are structured
+            r = await call("bim_elements", {"source": GC_ITEM, "where": "Category=Walls AND", "limit": 1})
+            assert r.get("error") == "where_parse", r
+            r = await call("bim_elements", {"source": GC_ITEM, "where": "NoSuchField=1", "limit": 1})
+            assert r["matched"] == 0 and r["field_values"][0]["problem"] == "no such field", r
+            r = await call("bim_elements", {"source": GC_ITEM, "where": "Category=Nope", "limit": 1})
+            assert r["matched"] == 0 and r["field_values"][0]["sample_values"], r
+            print("8 hints      : where_parse + no-such-field + sample_values")
 
     print("bim regressions OK")
 

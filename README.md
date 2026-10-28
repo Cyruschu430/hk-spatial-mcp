@@ -791,15 +791,22 @@ Attributes live in per-node attribute pages; these tools read them straight over
 package, no ArcGIS Pro.
 
 - `bim_audit(source)` — elements, level profile, field completeness, duplicate tags, type catalogue,
-  floor-slab coverage, and a plain-language verdict. `source` = SceneServer url or 32-char item id.
+  floor-slab coverage, and a plain-language verdict. `source` = SceneServer url or 32-char item id
+  (a scene service or a Scene Package — `.slpk` downloads once, then reads from the local copy; a
+  private package needs `ARCGIS_TOKEN`). Multi-discipline models are read whole: every sublayer with
+  geometry is merged and each row carries a `sublayer` tag (the duplicate `Overview` copy is skipped).
 - `bim_floors(source)` — slabs per level, bbox area per level (upper bound), coverage flag.
-- `bim_elements(source, where="Category=Doors", limit=20, group_by="ElementType")` — filter or count.
+- `bim_elements(source, where="Category=Doors AND BldgLevel=3", limit=20, group_by="ElementType")` —
+  filter or count. `where` is a real expression: `= != > >= < <=`, `AND/OR/NOT`, `LIKE '%PANTRY%'`,
+  `IN (a, b)`, `IS NULL`, or a bare word matched across every field; a zero-match answer lists the
+  values the field actually holds.
 - `site_zoning(source=<model> | lat=…&lon=…, radius_m=…)` — OZP zone, height control, slopes, landslides.
 - `lot_check(source)` — which lots the model extent sits on (bbox level) plus zone labels.
 
 Rules:
 
-1. Read once, reuse: the first call caches every row under `<work>/bim/`; pass `refresh=True` to re-read.
+1. Read once, reuse: the first call caches every row under `<work>/bim/`, per sublayer; pass
+   `refresh=True` to re-read. A crash or a refresh only redoes the sublayers that need it.
 2. Never promise GFA, floor area, travel distance, compartment size or clash detection. Slab bbox area is
    an upper bound, and only meaningful when `bim_floors().coverage_ok` is true.
 3. Report three states, never two: pass / fail / **cannot check** — and name the missing input.

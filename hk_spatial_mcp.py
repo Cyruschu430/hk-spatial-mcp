@@ -1336,16 +1336,119 @@ BIM_NOTE = ("面積為 element bbox 上限，唔係法定 GFA；OZP/BHC 為公�
 
 def _i3s_get(url, timeout=60):
     # ponytail: every i3s call is one small resource; parallel callers, no connection pooling.
+    if url.startswith("slpk://"):
+        return _slpk_get(url)
     body = _http(url, headers={"Accept-Encoding": "gzip", "User-Agent": "hk-spatial-mcp/bim"},
                  timeout=timeout)
     return _gzip.decompress(body) if body[:2] == b"\x1f\x8b" else body
 
 
 def _with_token(url):
+    if url.startswith("slpk://"):
+        return url
     tok = os.environ.get("ARCGIS_TOKEN") or ""
     if not tok:
         return url
     return url + ("&" if "?" in url else "?") + "token=" + urllib.parse.quote(tok)
+
+
+# ---------------------------------------------------------------- slpk backend
+#
+# A Scene Package (.slpk) is a zip holding the same i3s resources a SceneServer would
+# serve, so the whole BIM pipeline above it stays unchanged — _i3s_get just routes
+# slpk:// pseudo-URLs here. Two layouts exist in the wild: Esri's
+# 'layers/<L>/sublayers/<S>/...' and the Revit exporter's root-level 'sublayers/<S>/...';
+# entries may be plain, gzipped, or carry a .json.gz / .bin.gz suffix.
+
+_SLPK = {}  # item id -> {"zf": ZipFile, "names": {lower_name: actual_name}}
+
+
+def _slpk_zip(item_id):
+    hit = _SLPK.get(item_id)
+    if hit:
+        return hit
+    import zipfile
+    cache = WORK / "bim" / "slpk"
+    cache.mkdir(parents=True, exist_ok=True)
+    fp = cache / f"{item_id}.slpk"
+    if not fp.exists():
+        url = f"{AGOL}/content/items/{item_id}/data"
+        tok = os.environ.get("ARCGIS_TOKEN") or ""
+        if tok:
+            url += "?token=" + urllib.parse.quote(tok)
+        part = fp.with_suffix(".slpk.part")
+        req = urllib.request.Request(url, headers={"User-Agent": "hk-spatial-mcp/bim"})
+        with urllib.request.urlopen(req, timeout=900) as r, open(part, "wb") as f:
+            while True:  # stream: packages run to several hundred MB
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+        with open(part, "rb") as f:
+            magic = f.read(2)
+        if magic != b"PK":  # private/invalid items answer HTTP 200 with a JSON error body
+            part.unlink()
+            raise ValueError("item data is not an slpk zip — a private item needs ARCGIS_TOKEN, "
+                             "or the id is not a Scene Package")
+        os.replace(part, fp)
+    zf = zipfile.ZipFile(fp)
+    _SLPK[item_id] = {"zf": zf, "names": {n.lower(): n for n in zf.namelist()}}
+    return _SLPK[item_id]
+
+
+def _slpk_get(url):
+    rest = url[len("slpk://"):]
+    item, _, path = rest.partition("/")
+    path, _, query = path.partition("?")
+    z = _slpk_zip(item_id=item)
+    bases = [path]
+    m = re.fullmatch(r"layers/\d+/sublayers/(\d+)(?:/(.*))?", path)
+    if m:
+        bases.append(f"sublayers/{m.group(1)}" + (f"/{m.group(2)}" if m.group(2) else ""))
+    cands = []
+    for b in bases:
+        if "f=json" in query:
+            b = (b + "/") if b else ""
+            cands += [b + "3dSceneLayer.json", b + "3dSceneLayer.json.gz"]
+        else:
+            cands += [b, b + ".gz", b + ".json.gz", b + ".bin.gz"]
+    for c in cands:
+        hit = z["names"].get(c.lower())
+        if hit:
+            buf = z["zf"].read(hit)
+            return _gzip.decompress(buf) if buf[:2] == b"\x1f\x8b" else buf
+    raise FileNotFoundError(f"{path or '(root)'} not in slpk {item}")
+
+
+def _slpk_sublayer_paths(service):
+    """Sublayer base paths inside the package, from the zip directory itself — the root
+    document does not always list them the way a service would."""
+    item = service[len("slpk://"):]
+    z = _slpk_zip(item)
+    paths = set()
+    for name in z["names"].values():
+        m = re.match(r"^(layers/\d+/sublayers/\d+|sublayers/\d+)/3dSceneLayer\.json", name, re.I)
+        if m:
+            paths.add(m.group(1))
+    if not paths:
+        return [service]  # single-layer package: the root document IS the layer
+    return [f"{service}/{p}" for p in sorted(paths)]
+
+
+def _slpk_node_ids(base):
+    """Node ids from the zip directory, for packages with no nodepages index."""
+    item, _, path = base[len("slpk://"):].partition("/")
+    z = _slpk_zip(item)
+    prefixes = [path]
+    m = re.fullmatch(r"layers/\d+/sublayers/(\d+)", path)
+    if m:
+        prefixes.append(f"sublayers/{m.group(1)}")
+    for pre in prefixes:
+        pat = re.compile("^" + re.escape((pre + "/") if pre else "") + r"nodes/([^/]+)/")
+        ids = [m.group(1) for n in z["names"].values() if (m := pat.match(n)) and m.group(1) != "root"]
+        if ids:
+            return sorted(set(ids), key=lambda s: (len(s), s))
+    return []
 
 
 def _i3s_decode(buf):
@@ -1377,34 +1480,44 @@ def _i3s_decode(buf):
 
 def _bim_service(source):
     s = (source or "").strip()
-    if s.startswith("http"):
+    if s.startswith(("http", "slpk://")):
         return s.rstrip("/")
     if re.fullmatch(r"[0-9a-fA-F]{32}", s):
         item = json.loads(_http(_with_token(f"{AGOL}/content/items/{s}?f=json")))
         url = (item.get("url") or "").rstrip("/")
-        if not url:
-            raise ValueError("item has no service url — it is not a scene service")
-        return url
+        if url:
+            return url
+        if (item.get("type") or "").lower() == "scene package":
+            return f"slpk://{s}"
+        if item.get("error"):
+            raise ValueError(f"AGOL item error: {item['error'].get('message')}")
+        raise ValueError(f"item has no service url — it is a {item.get('type') or 'unknown'} item, "
+                         "not a scene service or Scene Package")
     raise ValueError("pass a SceneServer url or a 32-char AGOL item id")
 
 
-def _bim_sublayer(service):
-    """pick the sublayer that actually holds geometry: nodes first, then attribute count.
+def _bim_sublayers(service):
+    """All 3DObject (sub)layers that actually hold geometry, best first: (base, meta) pairs.
 
     A Building Scene Layer exposes 'Full Model' *and* 'Overview'; the former often has no
     metadata at all (layerType null, 0 attributes). Counting nodes is what tells them apart.
     A plain 3DObject scene service has no Building wrapper and no nested sublayers — the
-    layer itself is the 3DObject, so it becomes its own candidate.
+    layer itself is the 3DObject, so it becomes its own candidate. Scene Packages are
+    enumerated from the zip directory. Every live sublayer is returned so multi-discipline
+    models (structure + architectural + MEP…) are read whole, not just their Overview.
     """
-    doc = json.loads(_i3s_get(_with_token(service + "?f=json")))
-    cands = []
-    for layer in doc.get("layers", []) or []:
-        subs = layer.get("sublayers") or []
-        if subs:
-            cands += [f"{service}/layers/{layer['id']}/sublayers/{s['id']}" for s in subs]
-        else:
-            cands.append(f"{service}/layers/{layer['id']}")
-    best = None
+    if service.startswith("slpk://"):
+        cands = _slpk_sublayer_paths(service)
+    else:
+        doc = json.loads(_i3s_get(_with_token(service + "?f=json")))
+        cands = []
+        for layer in doc.get("layers", []) or []:
+            subs = layer.get("sublayers") or []
+            if subs:
+                cands += [f"{service}/layers/{layer['id']}/sublayers/{s['id']}" for s in subs]
+            else:
+                cands.append(f"{service}/layers/{layer['id']}")
+    scored = []
     for base in cands:
         try:
             meta = json.loads(_i3s_get(_with_token(base + "?f=json")))
@@ -1417,23 +1530,41 @@ def _bim_sublayer(service):
             nodes = len(page.get("nodes") or [])
         except Exception:
             nodes = 0
-        score = (nodes, len(meta.get("attributeStorageInfo") or []))
-        if best is None or score > best[0]:
-            best = (score, base, meta)
-    if not best:
+        scored.append(((nodes, len(meta.get("attributeStorageInfo") or [])), base, meta))
+    if not scored:
         raise ValueError("no 3DObject sublayer found")
-    return best[1], best[2]
+    scored.sort(key=lambda t: t[0], reverse=True)
+    live = [t for t in scored if t[0][0] > 0]
+    picked = live or scored
+    # A Building package ships an 'Overview' sublayer: a reduced duplicate of the
+    # discipline sublayers for fast display. Reading it alongside them double-counts —
+    # drop it when real discipline sublayers are live (GrandCentral: 879 of its 10,049
+    # rows duplicate the 757 Walls).
+    real = [t for t in picked if (t[2].get("name") or "").lower() != "overview"]
+    if real:
+        picked = real
+    return [(base, meta) for _, base, meta in picked]
 
 
-def _bim_rows(source, refresh=False):
-    service = _bim_service(source)
+def _bim_sublayer(service):
+    """The single best (sub)layer — kept for callers that only want one."""
+    return _bim_sublayers(service)[0]
+
+
+_BIM_ROWS_V = 3   # v3: merged rows exclude the duplicate 'Overview' sublayer
+_BIM_LAYER_V = 2  # v2: per-sublayer row cache (its format is unaffected by the v3 rule)
+
+
+def _bim_layer_rows(base, meta, refresh=False):
+    """Rows of ONE (sub)layer under its own persistent cache, so a refresh or a crash on a
+    multi-discipline model only redoes the layers that need it."""
     cache = WORK / "bim"
     cache.mkdir(parents=True, exist_ok=True)
-    fp = cache / (hashlib.md5(service.encode()).hexdigest() + ".json")
+    fp = cache / (hashlib.md5(base.encode()).hexdigest() + ".layer.json")
     if fp.exists() and not refresh:
-        return json.loads(fp.read_text(encoding="utf-8"))
-
-    base, meta = _bim_sublayer(service)
+        d = json.loads(fp.read_text(encoding="utf-8"))
+        if d.get("v") == _BIM_LAYER_V:
+            return d
     info = {a["name"]: a["key"] for a in meta.get("attributeStorageInfo") or []}
     fields = [f for f in BIM_FIELDS if f in info]
     ids, page = [], 0
@@ -1446,6 +1577,8 @@ def _bim_rows(source, refresh=False):
             break
         ids += [x["index"] for x in doc["nodes"]]
         page += 1
+    if not ids and base.startswith("slpk://"):
+        ids = _slpk_node_ids(base)  # packages that only carry per-node resources, no index
 
     def feats(nid):
         try:
@@ -1482,9 +1615,37 @@ def _bim_rows(source, refresh=False):
                 c = cols[f]
                 row[f] = c[i] if c and i < len(c) else None
             rows.append(row)
-    out = {"service": service, "sublayer": meta.get("name"), "nodes": len(ids),
-           "layerType": meta.get("layerType") or "3DObject",
+    out = {"v": _BIM_LAYER_V, "base": base, "sublayer": meta.get("name"), "nodes": len(ids),
            "fields": fields, "rows": rows}
+    fp.write_text(json.dumps(out), encoding="utf-8")
+    return out
+
+
+def _bim_rows(source, refresh=False):
+    service = _bim_service(source)
+    cache = WORK / "bim"
+    cache.mkdir(parents=True, exist_ok=True)
+    fp = cache / (hashlib.md5(service.encode()).hexdigest() + ".json")
+    if fp.exists() and not refresh:
+        d = json.loads(fp.read_text(encoding="utf-8"))
+        if d.get("v") == _BIM_ROWS_V:
+            return d
+
+    merged, fields, names, nodes = [], [], [], 0
+    for base, meta in _bim_sublayers(service):
+        d = _bim_layer_rows(base, meta, refresh)
+        for r in d["rows"]:
+            r["sublayer"] = d["sublayer"]
+        merged += d["rows"]
+        nodes += d["nodes"]
+        for f in d["fields"]:
+            if f not in fields:
+                fields.append(f)
+        if d["sublayer"]:
+            names.append(str(d["sublayer"]))
+    out = {"v": _BIM_ROWS_V, "service": service, "sublayer": ", ".join(names),
+           "sublayers": len(names), "nodes": nodes, "layerType": "3DObject",
+           "fields": fields, "rows": merged}
     fp.write_text(json.dumps(out), encoding="utf-8")
     return out
 
@@ -1495,6 +1656,13 @@ def _bim_bbox(rows):
     if not lons:
         return None
     return [min(lons), min(lats), max(lons), max(lats)]
+
+
+def _service_tag(service):
+    """Last non-empty path segment, slug-safe for any service form — SceneServer urls and
+    slpk:// pseudo-services alike ('.../SceneServer' → its name, 'slpk://<id>' → the id)."""
+    segs = [s for s in str(service).split("/") if s]
+    return (segs[-1] if segs else "model")[:28]
 
 
 def _empty(v, field=""):
@@ -1530,7 +1698,7 @@ def _links(bbox, service=""):
 def bim_audit(source: str, refresh: bool = False) -> str:
     """Audit a BIM scene layer (slpk / scene service) and report data quality. Read-only.
 
-    source: SceneServer url or AGOL item id."""
+    source: SceneServer url or AGOL item id (scene service or Scene Package .slpk)."""
     d = _bim_rows(source, refresh)
     rows, total = d["rows"], len(d["rows"])
     lv = {}
@@ -1545,7 +1713,8 @@ def bim_audit(source: str, refresh: bool = False) -> str:
     floors = [r for r in rows if str(r.get("Category") or "").lower() in ("floors", "floor", "slab")]
     lv_count = len({str(r.get("BldgLevel_Desc") or r.get("BldgLevel")) for r in rows})
     out = {
-        "service": d["service"], "sublayer": d["sublayer"], "nodes": d["nodes"],
+        "service": d["service"], "sublayer": d["sublayer"], "sublayers": d.get("sublayers", 1),
+        "nodes": d["nodes"],
         "elements": total, "levels": lv,
         "completeness_pct": {f: round(100 * n / total, 1) for f, n in comp.items()},
         "tags": {"filled": len(marks), "duplicated": dup},
@@ -1573,7 +1742,7 @@ def bim_audit(source: str, refresh: bool = False) -> str:
 
 
 def bim_floors(source: str, refresh: bool = False) -> str:
-    """Floor-slab inventory per level (bbox area = upper bound). source: SceneServer url or item id."""
+    """Floor-slab inventory per level (bbox area = upper bound). source: SceneServer url, or AGOL item id (scene service or Scene Package .slpk)."""
     d = _bim_rows(source, refresh)
     rows = d["rows"]
     floors = [r for r in rows if str(r.get("Category") or "").lower() in ("floors", "floor", "slab")]
@@ -1595,20 +1764,287 @@ def bim_floors(source: str, refresh: bool = False) -> str:
     }, ensure_ascii=False)
 
 
+# ---------------------------------------------------------------- where engine
+#
+# SQL-flavoured, case-insensitive keywords (ported from agol-bim-mcp):
+#
+#   expr    := or_expr
+#   or_expr := and_expr ( OR and_expr )*
+#   and_expr:= atom ( AND atom )*
+#   atom    := [NOT] ( comparison | is_null | like | in_list | bare_word )
+#   comparison := FIELD (=|==|!=|<>|>|>=|<|<=) VALUE
+#   is_null := FIELD IS [NOT] NULL
+#   like    := FIELD [NOT] LIKE 'pat%'      -- % any run, _ one char
+#   in_list := FIELD [NOT] IN (a, b, c)
+#
+# VALUE is taken raw to the next top-level AND/OR, so spaces and embedded double
+# quotes survive untouched.
+
+_WOPS = {
+    "=": lambda a, b: a == b, "==": lambda a, b: a == b,
+    "!=": lambda a, b: a != b, "<>": lambda a, b: a != b,
+    ">": lambda a, b: a > b, ">=": lambda a, b: a >= b,
+    "<": lambda a, b: a < b, "<=": lambda a, b: a <= b,
+}
+_WRE_CMP = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(==|!=|<>|>=|<=|=|>|<)\s*(.*)$", re.S)
+_WRE_IS = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s+IS\s+(NOT\s+)?NULL\s*$", re.I)
+_WRE_LIKE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s+(NOT\s+)?LIKE\s+(.+)$", re.I | re.S)
+_WRE_IN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s+(NOT\s+)?IN\s*\((.*)\)\s*$", re.I | re.S)
+
+
+class WhereError(ValueError):
+    pass
+
+
+def _unquote(v):
+    v = v.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
+        inner = v[1:-1]
+        return inner.replace(v[0] * 2, v[0])
+    return v
+
+
+def _wnum(x):
+    if isinstance(x, bool) or x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    try:
+        return float(str(x).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _matching_paren(s, i):
+    depth, q = 0, None
+    for j in range(i, len(s)):
+        c = s[j]
+        if q:
+            if c == q:
+                q = None
+            continue
+        if c in "'\"":
+            q = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+    return -1
+
+
+def _strip_outer(s):
+    s = s.strip()
+    while s.startswith("(") and _matching_paren(s, 0) == len(s) - 1:
+        s = s[1:-1].strip()
+    return s
+
+
+def _split_top(s, kw):
+    """Split on a top-level SQL keyword, ignoring quoted strings and parenthesised groups."""
+    parts, depth, q, start, i = [], 0, None, 0, 0
+    n, k = len(s), len(kw)
+    while i < n:
+        c = s[i]
+        if q:
+            if c == q:
+                q = None
+            i += 1
+            continue
+        if c in "'\"":
+            q = c
+            i += 1
+            continue
+        if c == "(":
+            depth += 1
+            i += 1
+            continue
+        if c == ")":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 0 and s[i:i + k].upper() == kw:
+            before = s[i - 1] if i else " "
+            after = s[i + k] if i + k < n else " "
+            if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                parts.append(s[start:i])
+                start = i + k
+                i += k
+                continue
+        i += 1
+    parts.append(s[start:])
+    return [p.strip() for p in parts]
+
+
+def _like_re(pat):
+    out = []
+    for ch in pat:
+        if ch == "%":
+            out.append(".*")
+        elif ch == "_":
+            out.append(".")
+        else:
+            out.append(re.escape(ch))
+    return re.compile("^" + "".join(out) + "$", re.I | re.S)
+
+
+def _wcompare(v, raw, op):
+    if v is None:
+        return False
+    a, b = _wnum(v), _wnum(raw)
+    if a is not None and b is not None:
+        return _WOPS[op](a, b)
+    return _WOPS[op](str(v).lower(), raw.lower())
+
+
+def _weq(v, raw):
+    if v is None:
+        return raw.strip() == "" or raw.strip().lower() in ("null", "none")
+    a, b = _wnum(v), _wnum(raw)
+    if a is not None and b is not None:
+        return a == b
+    return str(v).strip().lower() == raw.strip().lower()
+
+
+def _parse_atom(text, used):
+    t = _strip_outer(text)
+    if not t:
+        raise WhereError("empty condition")
+
+    m = re.match(r"^NOT\s+(.+)$", t, re.I | re.S)
+    if m:
+        inner = _parse_atom(m.group(1), used)
+        return lambda row, f=inner: not f(row)
+
+    m = _WRE_IS.match(t)
+    if m:
+        fld, neg = m.group(1), bool(m.group(2))
+        used.add(fld)
+        return lambda row, k=fld, n=neg: (row.get(k) is None) != n
+
+    m = _WRE_LIKE.match(t)
+    if m:
+        fld, neg, pat = m.group(1), bool(m.group(2)), _unquote(m.group(3))
+        used.add(fld)
+        rx = _like_re(pat)
+        return lambda row, k=fld, r=rx, n=neg: \
+            ((row.get(k) is not None and r.match(str(row.get(k))) is not None) != n)
+
+    m = _WRE_IN.match(t)
+    if m:
+        fld, neg, body = m.group(1), bool(m.group(2)), m.group(3)
+        used.add(fld)
+        vals = {_unquote(p).lower() for p in body.split(",") if p.strip()}
+        return lambda row, k=fld, v=vals, n=neg: \
+            ((row.get(k) is not None and str(row.get(k)).strip().lower() in v) != n)
+
+    m = _WRE_CMP.match(t)
+    if m:
+        fld, op, raw = m.group(1), m.group(2), _unquote(m.group(3))
+        used.add(fld)
+        if op in ("=", "=="):
+            return lambda row, k=fld, r=raw: _weq(row.get(k), r)
+        if op in ("!=", "<>"):
+            return lambda row, k=fld, r=raw: not _weq(row.get(k), r)
+        return lambda row, k=fld, o=op, r=raw: _wcompare(row.get(k), r, o)
+
+    # bare word: substring match across every field — still useful when you only know
+    # a fragment of a value
+    needle = _unquote(t).lower()
+    return lambda row, s=needle: \
+        any(s in str(v).lower() for v in row.values() if v is not None)
+
+
+def _compile_where(expr, used):
+    e = _strip_outer(expr)
+    ors = _split_top(e, "OR")
+    if len(ors) > 1:
+        fns = [_compile_where(p, used) for p in ors]
+        return lambda row: any(f(row) for f in fns)
+    ands = _split_top(e, "AND")
+    if len(ands) > 1:
+        fns = [_compile_where(p, used) for p in ands]
+        return lambda row: all(f(row) for f in fns)
+    return _parse_atom(e, used)
+
+
+def _build_where(where):
+    """-> (predicate | None, referenced fields, None) or (None, used, error dict)."""
+    where = str(where or "").strip()
+    if not where:
+        return None, set(), None
+    used = set()
+    try:
+        pred = _compile_where(where, used)
+    except WhereError as e:
+        return None, used, {"error": "where_parse", "detail": str(e), "where": where}
+    except Exception as e:  # never let a bad filter kill the tool
+        return None, used, {"error": "where_parse", "detail": f"{type(e).__name__}: {e}",
+                            "where": where}
+    return pred, used, None
+
+
+def _canon(field, names):
+    """Field lookup is case-insensitive; returns the real spelling or None."""
+    if field in names:
+        return field
+    low = field.lower()
+    for n in names:
+        if n.lower() == low:
+            return n
+    return None
+
+
+def _zero_hint(rows, used, names):
+    """A filter that matched nothing is the most common LLM dead end. Say why."""
+    info = {"matched": 0}
+    for f in sorted(used):
+        c = _canon(f, names)
+        if not c:
+            info.setdefault("field_values", []).append(
+                {"field": f, "problem": "no such field", "available": names[:40]})
+            continue
+        vals, seen = [], set()
+        for r in rows:
+            v = r.get(c)
+            if v is None:
+                continue
+            s = str(v)
+            if s not in seen:
+                seen.add(s)
+                vals.append(s)
+            if len(vals) >= 12:
+                break
+        info.setdefault("field_values", []).append(
+            {"field": c, "sample_values": vals, "rows_scanned": len(rows)})
+    return info
+
+
 def bim_elements(source: str, where: str = "", limit: int = 20,
                  group_by: str = "", refresh: bool = False) -> str:
-    """Filter BIM elements. where: 'Category=Walls' (equality, case-insensitive) or free text;
-    group_by: field name to count instead of listing. source: SceneServer url or item id."""
+    """Filter BIM elements. where — a real expression, not a single equality:
+        Category=Walls AND BldgLevel_Desc=03 OG OKFFB     (raw value; spaces and quotes survive)
+        RoomName LIKE '%PANTRY%'                          (% any run, _ one char)
+        Mark IN (32, 31, 05)
+        RoomNumber IS NULL
+        NOT Category=Doors
+    A bare word with no operator is matched as a substring across every field.
+    If a filter matches nothing you get field_values showing what the field holds.
+    group_by: field name to count instead of listing.
+    source: SceneServer url, or AGOL item id of a scene service or Scene Package (.slpk)."""
     d = _bim_rows(source, refresh)
     rows = d["rows"]
     if where:
-        if "=" in where:
-            k, v = where.split("=", 1)
-            k, v = k.strip(), v.strip().lower()
-            hits = [r for r in rows if str(r.get(k, "")).lower() == v]
-        else:
-            q = where.lower()
-            hits = [r for r in rows if any(q in str(r.get(f, "")).lower() for f in d["fields"])]
+        pred, used, werr = _build_where(where)
+        if werr:
+            return json.dumps({**werr, "tool": "bim_elements", "service": d["service"]},
+                              ensure_ascii=False)
+        hits = [r for r in rows if pred(r)]
+        if not hits and used:
+            hint = _zero_hint(rows, used, d["fields"])
+            return json.dumps({"service": d["service"], **hint, "note": BIM_NOTE},
+                              ensure_ascii=False)
     else:
         hits = rows
     if group_by:
@@ -1621,7 +2057,7 @@ def bim_elements(source: str, where: str = "", limit: int = 20,
                            "group_by": group_by, "rows": [{"value": k, "count": v} for k, v in pairs],
                            "note": BIM_NOTE}, ensure_ascii=False)
     slim = [{k: r.get(k) for k in ("id", "Category", "Family", "FamilyType", "BldgLevel", "Mark",
-                                   "lon", "lat")} for r in hits[:max(1, limit)]]
+                                   "sublayer", "lon", "lat")} for r in hits[:max(1, limit)]]
     return json.dumps({"service": d["service"], "matched": len(hits), "returned": len(slim),
                        "rows": slim, "note": BIM_NOTE}, ensure_ascii=False)
 
@@ -1903,7 +2339,7 @@ def bim_report(source: str, site: bool = True, refresh: bool = False) -> str:
 
     Reads the model over i3s, joins its extent to HK statutory layers, writes an A4 HTML report,
     serves it on the local port and prints a PDF when a Chromium binary is present.
-    source: SceneServer url or AGOL item id."""
+    source: SceneServer url or AGOL item id (scene service or Scene Package .slpk)."""
     a = json.loads(bim_audit(source, refresh))
     fl = json.loads(bim_floors(source, refresh))
     sz = None
@@ -1916,7 +2352,7 @@ def bim_report(source: str, site: bool = True, refresh: bool = False) -> str:
             sz = None
     generated = time.strftime("%Y-%m-%d %H:%M")
     html = _report_html(a, fl, sz, generated)
-    slug = _slug("bim-audit", [a["service"].rsplit("/", 2)[-2][:28]])
+    slug = _slug("bim-audit", [_service_tag(a["service"])])
     fp = WORK / f"{slug}.html"
     fp.write_text(html, encoding="utf-8")
     pdf = _print_pdf(fp.resolve(), (WORK / f"{slug}.pdf").resolve())
@@ -1977,7 +2413,7 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
     mode: "map" (2D MapView) or "scene" (3D SceneView with the BIM model itself).
     Findings are element-level and carry a reason: duplicate_mark, no_dimension, slab_coverage."""
     gj, service, ltype = _findings_geojson(source, refresh)
-    slug = _slug("bim-findings", [service.rsplit("/", 2)[-2][:28]])
+    slug = _slug("bim-findings", [_service_tag(service)])
     fp = WORK / f"{slug}.geojson"
     fp.write_text(json.dumps(gj), encoding="utf-8")
     counts = {}
@@ -2006,7 +2442,9 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
                      (xmax - xmin) * 111320 * math.cos(math.radians(cy)), 30)
         page.write_text(_SCENE_PAGE.format(
             title="BIM Findings — 3D", data_url=f"{slug}.geojson",
-            service=service, legend=legend, css=css,
+            # a Scene Package has no hosted layer for the viewer to load — markers only
+            service="" if service.startswith("slpk://") else service,
+            legend=legend, css=css,
             cam_lon=round(cx, 6), cam_lat=round(cy, 6),
             cam_above=int(min(240, max(60, span_m * 2.5))),
             symbols="".join(
@@ -2036,7 +2474,7 @@ def publish_findings(source: str, title: str = "BIM Audit Findings", refresh: bo
     gj, service = _findings_geojson(source, refresh)
     if not tok:
         return _no_token("publish_findings")
-    slug = _slug("bim-findings", [service.rsplit("/", 2)[-2][:28]])
+    slug = _slug("bim-findings", [_service_tag(service)])
     fp = WORK / f"{slug}.geojson"
     fp.write_text(json.dumps(gj), encoding="utf-8")
     return json.dumps({
@@ -2103,8 +2541,10 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
   const view = new SceneView({{ container: "view", map: map,
     camera: {{ position: {{ latitude: {cam_lat}, longitude: {cam_lon}, z: 600 }}, tilt: 62 }} }});
 
-  // BIM first, so it draws under the markers
-  const bim = new BuildingSceneLayer({{ url: "{service}", title: "BIM model" }});
+  // BIM first, so it draws under the markers. Empty service = slpk source, markers only.
+  const SVC = "{service}";
+  if (SVC) {{
+  const bim = new BuildingSceneLayer({{ url: SVC, title: "BIM model" }});
   map.add(bim, 0);
   bim.load().then(() => {{
     window.__layerKind = "BuildingSceneLayer";
@@ -2112,11 +2552,12 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
     frame();   // no-op if already framed; the view.when() path is the reliable one
   }}).catch(() => {{
     map.remove(bim);
-    const alt = new SceneLayer({{ url: "{service}", title: "BIM model" }});
+    const alt = new SceneLayer({{ url: SVC, title: "BIM model" }});
     map.add(alt, 0);
     alt.load().then(() => {{ window.__layerKind = "SceneLayer"; msg.textContent = "BIM: scene layer"; frame(); }})
       .catch(() => {{ window.__layerKind = "failed"; msg.textContent = "BIM 載入失敗"; }});
   }});
+  }} else {{ window.__layerKind = "none-slpk"; msg.textContent = "BIM: package source（無 hosted layer）"; }}
 
   fetch("{data_url}").then(r => r.json()).then(gj => {{
     let n = 0;

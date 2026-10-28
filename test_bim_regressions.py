@@ -56,10 +56,13 @@ async def main():
             print(f"0 schema     : {len(tools)} tools, bim_audit params intact")
 
             # 1. plain 3DObject scene service (was: ValueError 'no 3DObject sublayer found')
+            #    positions must be reprojected to WGS84 — the layer declares Web Mercator
             el = await call("bim_elements", {"source": MEINAU, "limit": 3})
             assert "error" not in el, el
             assert el["matched"] > 0 and el["rows"], el
-            print(f"1 3DObject   : {el['matched']} elements from a plain scene service")
+            lon, lat = el["rows"][0]["lon"], el["rows"][0]["lat"]
+            assert 7 < lon < 9 and 48 < lat < 49, (lon, lat)  # Strasbourg, not raw Mercator metres
+            print(f"1 3DObject   : {el['matched']} elements, reprojected to {lon:.4f},{lat:.4f}")
 
             # 2. CJK file writes under a plain spawn (was: UnicodeEncodeError at write_text)
             rp = await call("bim_report", {"source": ZCB_ITEM})
@@ -91,7 +94,14 @@ async def main():
             a = await call("bim_audit", {"source": GC_ITEM})
             assert "error" not in a, a
             assert a["sublayers"] == 9 and a["elements"] == 6919, (a["sublayers"], a["elements"])
-            print(f"6 merge      : {a['elements']} elements across {a['sublayers']} discipline sublayers")
+            cov = a.get("coverage") or {}
+            # interior i3s nodes legitimately have no features; real failures must be zero
+            assert not cov.get("nodes_failed") and not cov.get("attr_failed"), cov
+            assert (cov.get("nodes_with_features", 0) + cov.get("nodes_empty", 0)
+                    + cov.get("nodes_failed", 0)) == cov.get("nodes"), cov
+            print(f"6 merge      : {a['elements']} elements, {a['sublayers']} sublayers, "
+                  f"coverage {cov['nodes_with_features']}/{cov['nodes']} nodes "
+                  f"({cov.get('nodes_empty', 0)} structural empties)")
 
             # 7. where grammar (counts verified against agol-bim-mcp / direct runs)
             expect = {"Category=Walls AND BldgLevel=20": 8, "BldgLevel IN (10, 20)": 78,

@@ -1082,7 +1082,9 @@ def arcgis_request(path: str, params: dict | None = None, method: str = "GET") -
     p = dict(params or {})
     p.setdefault("f", "json")
     p["token"] = _token()
-    url = f"{AGOL}/{path.lstrip('/')}"
+    # a full http(s) url is used verbatim — feature-service queries and GP tasks live
+    # outside the sharing/rest root (servicesN.arcgis.com)
+    url = path if path.startswith("http") else f"{AGOL}/{path.lstrip('/')}"
     if method.upper() == "GET":
         raw = _http(url + "?" + urllib.parse.urlencode(p), timeout=120)
     else:
@@ -1108,10 +1110,17 @@ def publish_layer(dataset_id: str, title: str = "", tags: str = "CSDI,Hong Kong"
             return json.dumps(r)
         src = pathlib.Path(r["file"])
     title = title or dataset_id
+    return json.dumps(_publish_geojson(src, title, tags), ensure_ascii=False)
+
+
+def _publish_geojson(src, title, tags):
+    """Upload a GeoJSON file and publish it as a hosted feature layer, polling the async
+    publish job to its final status (verified end-to-end on 2026-10-29)."""
+    tok = _token()
     me = json.loads(_redact(_http(f"{AGOL}/community/self?f=json&token={urllib.parse.quote(tok)}").decode()))
     user = me.get("username")
     if not user:
-        return json.dumps({"error": "token rejected by ArcGIS Online", "detail": me})
+        return {"error": "token rejected by ArcGIS Online", "detail": me}
     boundary = secrets.token_hex(12)
     body = _multipart(boundary, {"f": "json", "token": tok, "title": title, "type": "GeoJson",
                                  "tags": tags, "fileName": src.name},
@@ -1120,7 +1129,7 @@ def publish_layer(dataset_id: str, title: str = "", tags: str = "CSDI,Hong Kong"
                                    {"Content-Type": f"multipart/form-data; boundary={boundary}"},
                                    timeout=300).decode()))
     if not add.get("success"):
-        return json.dumps({"error": "addItem failed", "detail": add})
+        return {"error": "addItem failed", "detail": add}
     item_id = add["id"]
     pub = json.loads(_redact(_http(
         f"{AGOL}/content/users/{user}/publish",
@@ -1129,9 +1138,24 @@ def publish_layer(dataset_id: str, title: str = "", tags: str = "CSDI,Hong Kong"
                                     {"name": re.sub(r"[^A-Za-z0-9_]", "_", title)[:90],
                                      "layerName": title[:90]})}).encode(),
         timeout=300).decode()))
-    return json.dumps({"itemId": item_id, "title": title,
-                       "item_url": f"https://www.arcgis.com/home/item.html?id={item_id}",
-                       "publish": pub.get("success", False), "detail": pub}, ensure_ascii=False)
+    svc = (pub.get("services") or [{}])[0]
+    job, ok = svc.get("jobId"), False
+    if job:
+        for _ in range(20):  # publish is async — poll until it settles (≤ ~2 min)
+            st = json.loads(_redact(_http(
+                f"{AGOL}/content/users/{user}/items/{item_id}/status",
+                urllib.parse.urlencode({"jobId": job, "f": "json", "token": tok}).encode(),
+                timeout=60).decode()))
+            if st.get("status") == "completed":
+                ok = True
+                break
+            if st.get("status") == "failed":
+                return {"error": "publish job failed", "itemId": item_id, "detail": st}
+            time.sleep(6)
+    return {"itemId": item_id, "title": title,
+            "item_url": f"https://www.arcgis.com/home/item.html?id={item_id}",
+            "publish": ok, "service_url": svc.get("serviceurl"),
+            "service_item_id": svc.get("serviceItemId")}
 
 
 def _multipart(boundary: str, fields: dict, files: dict) -> bytes:
@@ -1496,7 +1520,7 @@ def _bim_service(source):
     raise ValueError("pass a SceneServer url or a 32-char AGOL item id")
 
 
-def _bim_sublayers(service):
+def _bim_sublayers(service, report=None):
     """All 3DObject (sub)layers that actually hold geometry, best first: (base, meta) pairs.
 
     A Building Scene Layer exposes 'Full Model' *and* 'Overview'; the former often has no
@@ -1505,6 +1529,9 @@ def _bim_sublayers(service):
     layer itself is the 3DObject, so it becomes its own candidate. Scene Packages are
     enumerated from the zip directory. Every live sublayer is returned so multi-discipline
     models (structure + architectural + MEP…) are read whole, not just their Overview.
+
+    report: pass a list to collect every skipped candidate with its reason — the audit
+    surfaces it instead of swallowing the gap silently.
     """
     if service.startswith("slpk://"):
         cands = _slpk_sublayer_paths(service)
@@ -1521,9 +1548,14 @@ def _bim_sublayers(service):
     for base in cands:
         try:
             meta = json.loads(_i3s_get(_with_token(base + "?f=json")))
-        except Exception:
+        except Exception as e:
+            if report is not None:
+                report.append({"base": base, "reason": f"meta unreadable: {type(e).__name__}: {e}"})
             continue
         if meta.get("layerType") != "3DObject":
+            if report is not None:
+                report.append({"base": base, "name": meta.get("name"),
+                               "reason": f"layerType is {meta.get('layerType')}, not 3DObject"})
             continue
         try:
             page = json.loads(_i3s_get(_with_token(f"{base}/nodepages/0")))
@@ -1535,6 +1567,10 @@ def _bim_sublayers(service):
         raise ValueError("no 3DObject sublayer found")
     scored.sort(key=lambda t: t[0], reverse=True)
     live = [t for t in scored if t[0][0] > 0]
+    if report is not None:
+        for (n, _), base, meta in scored:
+            if n == 0:
+                report.append({"base": base, "name": meta.get("name"), "reason": "0 nodes"})
     picked = live or scored
     # A Building package ships an 'Overview' sublayer: a reduced duplicate of the
     # discipline sublayers for fast display. Reading it alongside them double-counts —
@@ -1542,6 +1578,11 @@ def _bim_sublayers(service):
     # rows duplicate the 757 Walls).
     real = [t for t in picked if (t[2].get("name") or "").lower() != "overview"]
     if real:
+        if report is not None:
+            for _, base, meta in picked:
+                if (meta.get("name") or "").lower() == "overview":
+                    report.append({"base": base, "name": meta.get("name"),
+                                   "reason": "duplicate of the discipline sublayers"})
         picked = real
     return [(base, meta) for _, base, meta in picked]
 
@@ -1551,8 +1592,35 @@ def _bim_sublayer(service):
     return _bim_sublayers(service)[0]
 
 
-_BIM_ROWS_V = 3   # v3: merged rows exclude the duplicate 'Overview' sublayer
-_BIM_LAYER_V = 2  # v2: per-sublayer row cache (its format is unaffected by the v3 rule)
+_BIM_ROWS_V = 5   # v5: coverage splits structural empties from real failures
+_BIM_LAYER_V = 4  # v4: + per-sublayer coverage (empty vs failed) and pos_wkid
+
+
+def _reproject_rows(rows, wkid):
+    """i3s positions arrive in the layer's own SRS (Meinau: Lambert-93 metres), but the
+    maps, viewers and HK statutory joins all need WGS84 degrees. Batch through Esri's
+    public geometry service — the same keyless endpoint geometry_op uses."""
+    idx = [i for i, r in enumerate(rows) if r.get("lon") is not None and r.get("lat") is not None]
+    if not idx:
+        return
+    if all(abs(rows[i]["lon"]) <= 180 and abs(rows[i]["lat"]) <= 90 for i in idx):
+        return  # degree-plausible already; some layers mislabel their wkid
+    out = []
+    for i in range(0, len(idx), 1000):
+        chunk = idx[i:i + 1000]
+        payload = json.dumps({"geometryType": "esriGeometryPoint",
+                              "geometries": [{"x": rows[j]["lon"], "y": rows[j]["lat"]}
+                                             for j in chunk]})
+        params = urllib.parse.urlencode({"f": "json", "inSR": wkid, "outSR": 4326,
+                                         "geometries": payload}).encode()
+        d = json.loads(_http(f"{GEOM_SRV}/project", data=params,
+                             headers={"Content-Type": "application/x-www-form-urlencoded"},
+                             timeout=120))
+        out += [(g["x"], g["y"]) for g in d.get("geometries", [])]
+    if len(out) != len(idx):
+        raise ValueError(f"reprojection returned {len(out)}/{len(idx)} points (inSR {wkid})")
+    for i, (x, y) in zip(idx, out):
+        rows[i]["lon"], rows[i]["lat"] = round(x, 7), round(y, 7)
 
 
 def _bim_layer_rows(base, meta, refresh=False):
@@ -1581,16 +1649,24 @@ def _bim_layer_rows(base, meta, refresh=False):
         ids = _slpk_node_ids(base)  # packages that only carry per-node resources, no index
 
     def feats(nid):
+        # i3s interior nodes legitimately carry no features of their own (geometry lives
+        # in the leaves) — a missing page is 'empty', a broken one is 'failed'.
         try:
             d = json.loads(_i3s_get(_with_token(f"{base}/nodes/{nid}/features/0")))
+        except FileNotFoundError:
+            return nid, [], "empty"
+        except urllib.error.HTTPError as e:
+            return nid, [], "empty" if e.code == 404 else "failed"
         except Exception:
-            return nid, []
+            return nid, [], "failed"
         return nid, [(f.get("id"), f.get("mbb") or [], f.get("position") or [])
-                     for f in d.get("featureData", [])]
+                     for f in d.get("featureData", [])], "ok"
 
     with _Pool(10) as ex:
-        F = dict(ex.map(feats, ids))
-    active = {k: v for k, v in F.items() if v}
+        res = list(ex.map(feats, ids))
+    active = {nid: fl for nid, fl, _ in res if fl}
+    n_empty = sum(1 for _, fl, st in res if not fl and st == "empty")
+    n_failed = sum(1 for _, fl, st in res if not fl and st == "failed")
 
     def attr(nid, key, n):
         try:
@@ -1615,8 +1691,19 @@ def _bim_layer_rows(base, meta, refresh=False):
                 c = cols[f]
                 row[f] = c[i] if c and i < len(c) else None
             rows.append(row)
+
+    sr = meta.get("spatialReference") or {}
+    wkid = sr.get("latestWkid") or sr.get("wkid")
+    if wkid and int(wkid) != 4326:
+        _reproject_rows(rows, int(wkid))
+    attr_failed = {f: sum(1 for nid in active if data[f].get(nid) is None) for f in fields}
     out = {"v": _BIM_LAYER_V, "base": base, "sublayer": meta.get("name"), "nodes": len(ids),
-           "fields": fields, "rows": rows}
+           "fields": fields, "pos_wkid": 4326, "source_wkid": wkid,
+           "coverage": {"nodes": len(ids), "nodes_with_features": len(active),
+                        **({"nodes_empty": n_empty} if n_empty else {}),
+                        **({"nodes_failed": n_failed} if n_failed else {}),
+                        "attr_failed": {f: n for f, n in attr_failed.items() if n}},
+           "rows": rows}
     fp.write_text(json.dumps(out), encoding="utf-8")
     return out
 
@@ -1631,21 +1718,32 @@ def _bim_rows(source, refresh=False):
         if d.get("v") == _BIM_ROWS_V:
             return d
 
-    merged, fields, names, nodes = [], [], [], 0
-    for base, meta in _bim_sublayers(service):
+    merged, fields, names = [], [], []
+    skipped = []
+    cov = {"nodes": 0, "nodes_with_features": 0, "attr_failed": {}}
+    for base, meta in _bim_sublayers(service, report=skipped):
         d = _bim_layer_rows(base, meta, refresh)
         for r in d["rows"]:
             r["sublayer"] = d["sublayer"]
         merged += d["rows"]
-        nodes += d["nodes"]
+        c = d.get("coverage") or {}
+        cov["nodes"] += c.get("nodes", d["nodes"])
+        cov["nodes_with_features"] += c.get("nodes_with_features", 0)
+        for k in ("nodes_empty", "nodes_failed"):
+            if c.get(k):
+                cov[k] = cov.get(k, 0) + c[k]
+        for f, n in (c.get("attr_failed") or {}).items():
+            cov["attr_failed"][f] = cov["attr_failed"].get(f, 0) + n
         for f in d["fields"]:
             if f not in fields:
                 fields.append(f)
         if d["sublayer"]:
             names.append(str(d["sublayer"]))
+    if skipped:
+        cov["sublayers_skipped"] = skipped
     out = {"v": _BIM_ROWS_V, "service": service, "sublayer": ", ".join(names),
-           "sublayers": len(names), "nodes": nodes, "layerType": "3DObject",
-           "fields": fields, "rows": merged}
+           "sublayers": len(names), "nodes": cov["nodes"], "layerType": "3DObject",
+           "fields": fields, "coverage": cov, "rows": merged}
     fp.write_text(json.dumps(out), encoding="utf-8")
     return out
 
@@ -1712,11 +1810,16 @@ def bim_audit(source: str, refresh: bool = False) -> str:
     dup = len(marks) - len(set(marks))
     floors = [r for r in rows if str(r.get("Category") or "").lower() in ("floors", "floor", "slab")]
     lv_count = len({str(r.get("BldgLevel_Desc") or r.get("BldgLevel")) for r in rows})
+    cov_raw = d.get("coverage") or {}
+    coverage = {"nodes": cov_raw.get("nodes"), "nodes_with_features": cov_raw.get("nodes_with_features")}
+    for k in ("nodes_empty", "nodes_failed", "attr_failed", "sublayers_skipped"):
+        if cov_raw.get(k):
+            coverage[k] = cov_raw[k]
     out = {
         "service": d["service"], "sublayer": d["sublayer"], "sublayers": d.get("sublayers", 1),
         "nodes": d["nodes"],
-        "elements": total, "levels": lv,
-        "completeness_pct": {f: round(100 * n / total, 1) for f, n in comp.items()},
+        "elements": total, "levels": lv, "coverage": coverage,
+        "completeness_pct": {f: round(100 * n / max(total, 1), 1) for f, n in comp.items()},
         "tags": {"filled": len(marks), "duplicated": dup},
         "catalogue": {"category": len({r.get("Category") for r in rows if r.get("Category")}),
                       "family": len({r.get("Family") for r in rows if r.get("Family")}),
@@ -1729,7 +1832,17 @@ def bim_audit(source: str, refresh: bool = False) -> str:
         "links": _links(_bim_bbox(rows)),
         "note": BIM_NOTE,
     }
-    if comp.get("Mark", 0) / total > 0.9:
+    # skipped sublayers and structurally-empty nodes are listed for transparency but are
+    # NOT gaps: excluding the duplicate Overview is by design, and i3s interior nodes
+    # legitimately carry no features. Only real failures reach the verdict.
+    gaps = []
+    if coverage.get("nodes_failed"):
+        gaps.append(f"{coverage['nodes_failed']} 個 node 嘅 features 讀取失敗")
+    if coverage.get("attr_failed"):
+        gaps.append("attribute 缺頁 " + ", ".join(f"{f}×{n}" for f, n in coverage["attr_failed"].items()))
+    if gaps:
+        out["verdict"].append("讀取有缺口（" + "；".join(gaps) + "）→ 審核只涵蓋成功讀取嘅部分")
+    if comp.get("Mark", 0) / max(total, 1) > 0.9:
         out["verdict"].append("Mark 幾乎全空 → 不能用作資產編號 / FM 對接")
     if dup:
         out["verdict"].append(f"{dup} 個 Mark 重複 → join 會產生歧義")
@@ -2469,19 +2582,21 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
 
 
 def publish_findings(source: str, title: str = "BIM Audit Findings", refresh: bool = False) -> str:
-    """Publish the findings to ArcGIS Online as a hosted point layer (needs ARCGIS_TOKEN)."""
-    tok = _token()
-    gj, service = _findings_geojson(source, refresh)
-    if not tok:
+    """Publish the audit findings to ArcGIS Online as a hosted point layer (needs ARCGIS_TOKEN).
+
+    source: SceneServer url, or AGOL item id (scene service or Scene Package .slpk)."""
+    if not _token():
         return _no_token("publish_findings")
+    gj, service, _ltype = _findings_geojson(source, refresh)
+    if not gj["features"]:
+        return json.dumps({"error": "no findings to publish — the audit found nothing "
+                           "(bim_findings returns 0 features for this model)"}, ensure_ascii=False)
     slug = _slug("bim-findings", [_service_tag(service)])
     fp = WORK / f"{slug}.geojson"
     fp.write_text(json.dumps(gj), encoding="utf-8")
-    return json.dumps({
-        "prepared": str(fp), "features": len(gj["features"]),
-        "next": "POST /content/users/<user>/addItem (geojson → publish) — needs a verified org account",
-        "status": "prepared, not published",
-    }, ensure_ascii=False)
+    out = _publish_geojson(fp, title, "hk-spatial-mcp,BIM,findings")
+    out["findings"] = len(gj["features"])
+    return json.dumps(out, ensure_ascii=False)
 
 
 _SCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>

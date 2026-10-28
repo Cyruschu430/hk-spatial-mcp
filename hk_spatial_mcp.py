@@ -370,11 +370,27 @@ def _slug(title: str, ids) -> str:
     return base + "-" + hashlib.sha1(("|".join(map(str, ids)) + str(title)).encode()).hexdigest()[:6]
 
 
+def _id_list(dataset_ids):
+    """Normalise dataset ids: a real list, a JSON-array string, a comma-joined string, or one
+    bare id all become a list. A bare comma-joined string used to become ONE id and fail
+    downstream with a misleading 404."""
+    if isinstance(dataset_ids, str):
+        s = dataset_ids.strip()
+        if s.startswith("["):
+            try:
+                v = json.loads(s)
+                if isinstance(v, list):
+                    return [str(x).strip() for x in v if str(x).strip()]
+            except Exception:
+                pass
+        return [x.strip() for x in s.split(",") if x.strip()]
+    return [str(x) for x in (dataset_ids or [])]
+
+
 def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page: str,
            tilt: float = 60) -> str:
     """Shared builder for the 2D map (index.html) and the 3D scene (scene.html)."""
-    if isinstance(dataset_ids, str):
-        dataset_ids = [dataset_ids]
+    dataset_ids = _id_list(dataset_ids)
     layers, missing, warn = [], [], []
     for did in dataset_ids:
         p = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', did)}.geojson"
@@ -578,8 +594,7 @@ def export_static_svg(dataset_ids, title: str = "Hong Kong", basemap: str = "str
     svc = BASEMAPS.get(str(basemap).lower())
     if not svc:
         return json.dumps({"error": f"unknown basemap {basemap!r}", "basemaps": sorted(BASEMAPS)})
-    if isinstance(dataset_ids, str):
-        dataset_ids = [dataset_ids]
+    dataset_ids = _id_list(dataset_ids)
     layers = []
     for did in dataset_ids:
         feats, err = _cached_features(did)
@@ -1378,26 +1393,33 @@ def _bim_sublayer(service):
 
     A Building Scene Layer exposes 'Full Model' *and* 'Overview'; the former often has no
     metadata at all (layerType null, 0 attributes). Counting nodes is what tells them apart.
+    A plain 3DObject scene service has no Building wrapper and no nested sublayers — the
+    layer itself is the 3DObject, so it becomes its own candidate.
     """
     doc = json.loads(_i3s_get(_with_token(service + "?f=json")))
-    best = None
+    cands = []
     for layer in doc.get("layers", []) or []:
-        for s in layer.get("sublayers", []) or []:
-            base = f"{service}/layers/{layer['id']}/sublayers/{s['id']}"
-            try:
-                meta = json.loads(_i3s_get(_with_token(base + "?f=json")))
-            except Exception:
-                continue
-            if meta.get("layerType") != "3DObject":
-                continue
-            try:
-                page = json.loads(_i3s_get(_with_token(f"{base}/nodepages/0")))
-                nodes = len(page.get("nodes") or [])
-            except Exception:
-                nodes = 0
-            score = (nodes, len(meta.get("attributeStorageInfo") or []))
-            if best is None or score > best[0]:
-                best = (score, base, meta)
+        subs = layer.get("sublayers") or []
+        if subs:
+            cands += [f"{service}/layers/{layer['id']}/sublayers/{s['id']}" for s in subs]
+        else:
+            cands.append(f"{service}/layers/{layer['id']}")
+    best = None
+    for base in cands:
+        try:
+            meta = json.loads(_i3s_get(_with_token(base + "?f=json")))
+        except Exception:
+            continue
+        if meta.get("layerType") != "3DObject":
+            continue
+        try:
+            page = json.loads(_i3s_get(_with_token(f"{base}/nodepages/0")))
+            nodes = len(page.get("nodes") or [])
+        except Exception:
+            nodes = 0
+        score = (nodes, len(meta.get("attributeStorageInfo") or []))
+        if best is None or score > best[0]:
+            best = (score, base, meta)
     if not best:
         raise ValueError("no 3DObject sublayer found")
     return best[1], best[2]
@@ -1409,7 +1431,7 @@ def _bim_rows(source, refresh=False):
     cache.mkdir(parents=True, exist_ok=True)
     fp = cache / (hashlib.md5(service.encode()).hexdigest() + ".json")
     if fp.exists() and not refresh:
-        return json.loads(fp.read_text())
+        return json.loads(fp.read_text(encoding="utf-8"))
 
     base, meta = _bim_sublayer(service)
     info = {a["name"]: a["key"] for a in meta.get("attributeStorageInfo") or []}
@@ -1463,7 +1485,7 @@ def _bim_rows(source, refresh=False):
     out = {"service": service, "sublayer": meta.get("name"), "nodes": len(ids),
            "layerType": meta.get("layerType") or "3DObject",
            "fields": fields, "rows": rows}
-    fp.write_text(json.dumps(out))
+    fp.write_text(json.dumps(out), encoding="utf-8")
     return out
 
 
@@ -1896,7 +1918,7 @@ def bim_report(source: str, site: bool = True, refresh: bool = False) -> str:
     html = _report_html(a, fl, sz, generated)
     slug = _slug("bim-audit", [a["service"].rsplit("/", 2)[-2][:28]])
     fp = WORK / f"{slug}.html"
-    fp.write_text(html)
+    fp.write_text(html, encoding="utf-8")
     pdf = _print_pdf(fp.resolve(), (WORK / f"{slug}.pdf").resolve())
     return json.dumps({
         "html_url": f"http://localhost:{PORT}/{slug}.html",
@@ -1957,7 +1979,7 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
     gj, service, ltype = _findings_geojson(source, refresh)
     slug = _slug("bim-findings", [service.rsplit("/", 2)[-2][:28]])
     fp = WORK / f"{slug}.geojson"
-    fp.write_text(json.dumps(gj))
+    fp.write_text(json.dumps(gj), encoding="utf-8")
     counts = {}
     for f in gj["features"]:
         k = f["properties"]["finding"]
@@ -1991,10 +2013,11 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
                 f'{{ value: "{k}", symbol: {{ type: "point-3d", symbolLayers: [{{ type: "object", '
                 f'resource: {{ primitive: "cylinder" }}, material: {{ color: "{c}" }}, '
                 f'height: 12, width: 2.4, anchor: "bottom" }}] }} }},'
-                for k, c in colours)))
+                for k, c in colours)), encoding="utf-8")
     else:
         page.write_text(_FINDINGS_PAGE.format(
-            title="BIM Audit Findings", data_url=f"{slug}.geojson", legend=legend, css=css))
+            title="BIM Audit Findings", data_url=f"{slug}.geojson", legend=legend, css=css),
+            encoding="utf-8")
     return json.dumps({
         "service": service,
         "mode": mode,
@@ -2015,7 +2038,7 @@ def publish_findings(source: str, title: str = "BIM Audit Findings", refresh: bo
         return _no_token("publish_findings")
     slug = _slug("bim-findings", [service.rsplit("/", 2)[-2][:28]])
     fp = WORK / f"{slug}.geojson"
-    fp.write_text(json.dumps(gj))
+    fp.write_text(json.dumps(gj), encoding="utf-8")
     return json.dumps({
         "prepared": str(fp), "features": len(gj["features"]),
         "next": "POST /content/users/<user>/addItem (geojson → publish) — needs a verified org account",
@@ -2168,6 +2191,27 @@ require(["esri/Map","esri/views/MapView","esri/layers/GeoJSONLayer"], function(M
 
 # ---------------------------------------------------------------- MCP wiring
 
+def _safe(fn):
+    """Tool errors as data, not protocol exceptions.
+
+    The mcp 2.x server masks any raised exception as 'Error executing tool X' and drops the
+    message, so a failing tool is indistinguishable from a bug. Returning structured JSON lets
+    the caller read the reason and self-correct. Direct (in-process) calls still raise, which
+    keeps tests and debugging honest.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        try:
+            return fn(*a, **kw)
+        except Exception as e:
+            return json.dumps({"error": f"{type(e).__name__}: {e}", "tool": fn.__name__},
+                              ensure_ascii=False)
+
+    return wrapper
+
+
 def main():
     try:  # mcp 2.x renamed FastMCP -> MCPServer; keep 1.x working too
         from mcp.server.mcpserver import MCPServer as Server
@@ -2182,7 +2226,7 @@ def main():
     if (os.environ.get("HK_MCP_BIM") or "1").strip().lower() not in ("0", "false", "off", "no"):
         tools += list(bim_tools)          # HK_MCP_BIM=0 → CSDI-only server, same install
     for fn in tools:
-        mcp.tool()(fn)
+        mcp.tool()(_safe(fn))
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":
         mcp.run()

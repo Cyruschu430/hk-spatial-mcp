@@ -10,7 +10,7 @@ import sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-HERE = pathlib.Path("/home/admin/hk-spatial-mcp")
+HERE = pathlib.Path(__file__).resolve().parent
 BIM = ("https://tiles.arcgis.com/tiles/V6ZHFr6zdgNZuVG0/arcgis/rest/services/"
        "Bldg_E_Color_UC2020_demo/SceneServer")
 

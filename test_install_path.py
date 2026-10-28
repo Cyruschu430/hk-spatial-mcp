@@ -9,7 +9,9 @@ from mcp.client.stdio import stdio_client
 URL = "git+https://github.com/Cyruschu430/hk-spatial-mcp"
 EXPECTED = ["search_hk_data", "load_hk_data", "query_hk_data", "summarise_hk_data", "build_map", "build_scene",
             "geocode_address", "geometry_op", "elevation_at", "export_static_map", "export_static_svg",
-            "arcgis_request", "publish_layer"]
+            "arcgis_request", "publish_layer", "dataset_status", "spatial_join",
+            "bim_audit", "bim_floors", "bim_elements", "site_zoning", "lot_check",
+            "bim_findings", "bim_report", "publish_findings"]
 
 
 async def main():

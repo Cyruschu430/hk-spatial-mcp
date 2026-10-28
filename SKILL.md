@@ -62,6 +62,28 @@ terrain tiles. Everything below requires `ARCGIS_TOKEN` and mostly consumes cred
 If `ARCGIS_TOKEN` is missing the tool says so — tell the user to put a **user/OAuth token** in the MCP
 server `env` block. An API key will not work for content.
 
+## BIM scene layers (i3s) — audit, never guess
+
+BIM on ArcGIS is an i3s scene layer (`.slpk` / `/SceneServer`). There is **no** `/query`: the service may
+advertise Query, but `/layers/{n}/query` answers `Invalid URL`. These tools read the attribute pages for
+you, so do not try to query a scene layer directly and do not install the `arcgis` package.
+
+- `bim_audit(source)` → elements, levels, completeness, duplicate tags, catalogue, slab coverage, verdict.
+- `bim_floors(source)` → slabs per level + bbox area (an upper bound, not GFA).
+- `bim_elements(source, where="Category=Doors", limit=20, group_by="ElementType")` → filter or count.
+- `site_zoning(source=<model> | lat=…&lon=…)` → OZP zone, height control, slopes, landslides.
+- `lot_check(source)` → lots under the model extent (bbox level) + zone labels.
+
+Workflow when someone hands you a model: `bim_audit` → `bim_floors` → `site_zoning` → answer with a table
+plus the `links.map_viewer` / `links.scene_viewer` pair. One read caches every row (`refresh=True` to
+re-read); a second call is instant.
+
+Never claim: GFA, floor area, travel distance, compartment size, clash detection, or "compliant". Slab
+bbox area is an upper bound and only meaningful when `bim_floors().coverage_ok` is true. Report pass /
+fail / **cannot check** — the third state is the honest one when geometry is missing. `Mark` of 0 means
+unset, not a tag; >90% empty means the model cannot drive asset tracking. OZP/BHC here are public
+mirrors: the statutory plan prevails.
+
 ## Rules
 
 - Keep "Powered by Esri" attribution on every map.

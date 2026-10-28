@@ -783,6 +783,29 @@ python3 test_install_path.py     # against the published git URL — i.e. what u
 
 ---
 
+## BIM scene layers — audit, not rendering
+
+BIM published to ArcGIS is an **i3s scene layer** (`.slpk`, or a `/SceneServer`). It has no `/query`
+endpoint: `capabilities` may still advertise Query, but `/layers/{n}/query` answers `Invalid URL`.
+Attributes live in per-node attribute pages; these tools read them straight over REST, no `arcgis`
+package, no ArcGIS Pro.
+
+- `bim_audit(source)` — elements, level profile, field completeness, duplicate tags, type catalogue,
+  floor-slab coverage, and a plain-language verdict. `source` = SceneServer url or 32-char item id.
+- `bim_floors(source)` — slabs per level, bbox area per level (upper bound), coverage flag.
+- `bim_elements(source, where="Category=Doors", limit=20, group_by="ElementType")` — filter or count.
+- `site_zoning(source=<model> | lat=…&lon=…, radius_m=…)` — OZP zone, height control, slopes, landslides.
+- `lot_check(source)` — which lots the model extent sits on (bbox level) plus zone labels.
+
+Rules:
+
+1. Read once, reuse: the first call caches every row under `<work>/bim/`; pass `refresh=True` to re-read.
+2. Never promise GFA, floor area, travel distance, compartment size or clash detection. Slab bbox area is
+   an upper bound, and only meaningful when `bim_floors().coverage_ok` is true.
+3. Report three states, never two: pass / fail / **cannot check** — and name the missing input.
+4. `Mark` filled at 0 means unset, not a tag. Over 90% empty ⇒ the model cannot drive asset tracking.
+5. Say which layer is a mirror: OZP and BHC here are public mirrors — the statutory plan prevails.
+
 ## Licensing and attribution
 
 - Source code: MIT (see [LICENSE](LICENSE)).

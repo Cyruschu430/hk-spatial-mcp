@@ -1297,6 +1297,381 @@ if (ext.length) {
 """
 
 
+# ---------------------------------------------------------------- BIM (i3s) + statutory checks
+
+import gzip as _gzip
+import struct as _struct
+from concurrent.futures import ThreadPoolExecutor as _Pool
+
+HK_ZONE = "https://services3.arcgis.com/6j1KwZfY2fZrfNMR/arcgis/rest/services/ZONE/FeatureServer/0"
+HK_BHC = ("https://services3.arcgis.com/6j1KwZfY2fZrfNMR/arcgis/rest/services/"
+          "Outline_Zoning_Plans_Building_Height_Control_Areas/FeatureServer/0")
+HK_LOT = "https://services3.arcgis.com/6j1KwZfY2fZrfNMR/arcgis/rest/services/Lot_in_Hong_Kong/FeatureServer/0"
+HK_SLOPE = ("https://services3.arcgis.com/6j1KwZfY2fZrfNMR/arcgis/rest/services/"
+            "Registered_Man_made_Slopes_in_Hong_Kong/FeatureServer/0")
+HK_LANDSLIDE = ("https://services3.arcgis.com/6j1KwZfY2fZrfNMR/arcgis/rest/services/"
+                "Enhanced_Natural_Terrain_Landslide_Inventory/FeatureServer/0")
+
+BIM_FIELDS = ("Category", "Family", "FamilyType", "ElementType", "Discipline", "Mark",
+              "Typ_Mark", "BldgLevel", "BldgLevel_Desc", "BldgLevel_Elev")
+BIM_NOTE = ("面積為 element bbox 上限，唔係法定 GFA；OZP/BHC 為公開鏡像，"
+            "以法定圖則現行版本為準；非 Esri 官方產品。")
+
+
+def _i3s_get(url, timeout=60):
+    # ponytail: every i3s call is one small resource; parallel callers, no connection pooling.
+    body = _http(url, headers={"Accept-Encoding": "gzip", "User-Agent": "hk-spatial-mcp/bim"},
+                 timeout=timeout)
+    return _gzip.decompress(body) if body[:2] == b"\x1f\x8b" else body
+
+
+def _with_token(url):
+    tok = os.environ.get("ARCGIS_TOKEN") or ""
+    if not tok:
+        return url
+    return url + ("&" if "?" in url else "?") + "token=" + urllib.parse.quote(tok)
+
+
+def _i3s_decode(buf):
+    """i3s attribute page. strings: [count][byteCount][lens][blob]; numbers: [count][(pad)][values].
+
+    A page is only read as strings when its own length arithmetic proves it — the two numeric
+    layouts below both exist in the wild (BldgLevel has no pad, BldgLevel_Elev has one).
+    """
+    if len(buf) < 8:
+        return []
+    n = int.from_bytes(buf[0:4], "little")
+    if n == 0:
+        return []
+    bl = int.from_bytes(buf[4:8], "little")
+    if len(buf) == 8 + 4 * n + bl:
+        lens = _struct.unpack_from(f"<{n}I", buf, 8)
+        if sum(lens) == bl:
+            p, out = 8 + 4 * n, []
+            for L in lens:
+                out.append(buf[p:p + L].split(b"\x00")[0].decode("utf-8", "replace"))
+                p += L
+            return out
+    for off in (4, 8):
+        rest = len(buf) - off
+        if rest % n == 0 and rest // n in (4, 8):
+            return list(_struct.unpack_from(f"<{n}{'d' if rest // n == 8 else 'i'}", buf, off))
+    raise ValueError(f"unknown i3s attribute page (len={len(buf)}, count={n})")
+
+
+def _bim_service(source):
+    s = (source or "").strip()
+    if s.startswith("http"):
+        return s.rstrip("/")
+    if re.fullmatch(r"[0-9a-fA-F]{32}", s):
+        item = json.loads(_http(_with_token(f"{AGOL}/content/items/{s}?f=json")))
+        url = (item.get("url") or "").rstrip("/")
+        if not url:
+            raise ValueError("item has no service url — it is not a scene service")
+        return url
+    raise ValueError("pass a SceneServer url or a 32-char AGOL item id")
+
+
+def _bim_sublayer(service):
+    """pick the 3DObject sublayer with the most attributes (BSL: one per discipline)"""
+    doc = json.loads(_i3s_get(_with_token(service + "?f=json")))
+    best = None
+    for layer in doc.get("layers", []) or []:
+        for s in layer.get("sublayers", []) or []:
+            base = f"{service}/layers/{layer['id']}/sublayers/{s['id']}"
+            try:
+                meta = json.loads(_i3s_get(_with_token(base + "?f=json")))
+            except Exception:
+                continue
+            if meta.get("layerType") != "3DObject":
+                continue
+            score = len(meta.get("attributeStorageInfo") or [])
+            if best is None or score > best[0]:
+                best = (score, base, meta)
+    if not best:
+        raise ValueError("no 3DObject sublayer found")
+    return best[1], best[2]
+
+
+def _bim_rows(source, refresh=False):
+    service = _bim_service(source)
+    cache = WORK / "bim"
+    cache.mkdir(parents=True, exist_ok=True)
+    fp = cache / (hashlib.md5(service.encode()).hexdigest() + ".json")
+    if fp.exists() and not refresh:
+        return json.loads(fp.read_text())
+
+    base, meta = _bim_sublayer(service)
+    info = {a["name"]: a["key"] for a in meta.get("attributeStorageInfo") or []}
+    fields = [f for f in BIM_FIELDS if f in info]
+    ids, page = [], 0
+    while page < 200:
+        try:
+            doc = json.loads(_i3s_get(_with_token(f"{base}/nodepages/{page}")))
+        except Exception:
+            break
+        if not doc.get("nodes"):
+            break
+        ids += [x["index"] for x in doc["nodes"]]
+        page += 1
+
+    def feats(nid):
+        try:
+            d = json.loads(_i3s_get(_with_token(f"{base}/nodes/{nid}/features/0")))
+        except Exception:
+            return nid, []
+        return nid, [(f.get("id"), f.get("mbb") or [], f.get("position") or [])
+                     for f in d.get("featureData", [])]
+
+    with _Pool(10) as ex:
+        F = dict(ex.map(feats, ids))
+    active = {k: v for k, v in F.items() if v}
+
+    def attr(nid, key, n):
+        try:
+            v = _i3s_decode(_i3s_get(_with_token(f"{base}/nodes/{nid}/attributes/{key}/0")))
+            return v if len(v) == n else None
+        except Exception:
+            return None
+
+    data = {}
+    for f in fields:
+        with _Pool(10) as ex:
+            data[f] = dict(zip(active.keys(),
+                               ex.map(lambda n, k=info[f]: attr(n, k, len(active[n])), active.keys())))
+
+    rows = []
+    for nid, fl in active.items():
+        cols = {f: data[f].get(nid) for f in fields}
+        for i, (fid, mbb, pos) in enumerate(fl):
+            row = {"id": fid, "mbb": mbb, "lon": pos[0] if pos else None,
+                   "lat": pos[1] if pos else None}
+            for f in fields:
+                c = cols[f]
+                row[f] = c[i] if c and i < len(c) else None
+            rows.append(row)
+    out = {"service": service, "sublayer": meta.get("name"), "nodes": len(ids),
+           "fields": fields, "rows": rows}
+    fp.write_text(json.dumps(out))
+    return out
+
+
+def _bim_bbox(rows):
+    lons = [r["lon"] for r in rows if r.get("lon") is not None]
+    lats = [r["lat"] for r in rows if r.get("lat") is not None]
+    if not lons:
+        return None
+    return [min(lons), min(lats), max(lons), max(lats)]
+
+
+def _empty(v, field=""):
+    if v is None or v == "":
+        return True
+    return field in ("Mark", "Typ_Mark") and v == 0
+
+
+def _hk_query(layer, bbox, fields, where="1=1"):
+    env = json.dumps({"xmin": bbox[0], "ymin": bbox[1], "xmax": bbox[2], "ymax": bbox[3],
+                      "spatialReference": {"wkid": 4326}})
+    q = {"where": where, "geometry": env, "geometryType": "esriGeometryEnvelope",
+         "spatialRel": "esriSpatialRelIntersects", "inSR": 4326, "outFields": fields,
+         "returnGeometry": "false", "f": "json"}
+    url = layer + "/query?" + urllib.parse.urlencode(q)
+    doc = json.loads(_http(_with_token(url), timeout=60))
+    return [f.get("attributes", {}) for f in doc.get("features", [])]
+
+
+def _links(bbox, service=""):
+    out = {}
+    if bbox:
+        out["map_viewer"] = ("https://www.arcgis.com/apps/mapviewer/index.html?bbox="
+                             f"{bbox[0]:.6f},{bbox[1]:.6f},{bbox[2]:.6f},{bbox[3]:.6f}")
+    if service:
+        out["scene_viewer"] = ("https://www.arcgis.com/home/webscene/viewer.html?url="
+                               + urllib.parse.quote(service, safe="")
+                               + f"&viewpoint=cam:{((bbox[0]+bbox[2])/2) if bbox else 114.17},"
+                               f"{((bbox[1]+bbox[3])/2) if bbox else 22.32},800;70,0")
+    return out
+
+
+def bim_audit(source: str, refresh: bool = False) -> str:
+    """Audit a BIM scene layer (slpk / scene service) and report data quality. Read-only.
+
+    source: SceneServer url or AGOL item id."""
+    d = _bim_rows(source, refresh)
+    rows, total = d["rows"], len(d["rows"])
+    lv = {}
+    for r in rows:
+        k = r.get("BldgLevel_Desc") or r.get("BldgLevel")
+        lv[str(k)] = lv.get(str(k), 0) + 1
+    comp = {}
+    for f in d["fields"]:
+        comp[f] = sum(1 for r in rows if _empty(r.get(f), f))
+    marks = [r.get("Mark") for r in rows if not _empty(r.get("Mark"), "Mark")]
+    dup = len(marks) - len(set(marks))
+    floors = [r for r in rows if str(r.get("Category") or "").lower() in ("floors", "floor", "slab")]
+    lv_count = len({str(r.get("BldgLevel_Desc") or r.get("BldgLevel")) for r in rows})
+    out = {
+        "service": d["service"], "sublayer": d["sublayer"], "nodes": d["nodes"],
+        "elements": total, "levels": lv,
+        "completeness_pct": {f: round(100 * n / total, 1) for f, n in comp.items()},
+        "tags": {"filled": len(marks), "duplicated": dup},
+        "catalogue": {"category": len({r.get("Category") for r in rows if r.get("Category")}),
+                      "family": len({r.get("Family") for r in rows if r.get("Family")}),
+                      "family_type": len({r.get("FamilyType") for r in rows if r.get("FamilyType")})},
+        "floors": {"slabs": len(floors),
+                   "levels_with_slabs": len({str(r.get("BldgLevel_Desc") or r.get("BldgLevel"))
+                                             for r in floors}),
+                   "levels_total": lv_count},
+        "verdict": [],
+        "links": _links(_bim_bbox(rows)),
+        "note": BIM_NOTE,
+    }
+    if comp.get("Mark", 0) / total > 0.9:
+        out["verdict"].append("Mark 幾乎全空 → 不能用作資產編號 / FM 對接")
+    if dup:
+        out["verdict"].append(f"{dup} 個 Mark 重複 → join 會產生歧義")
+    if out["floors"]["slabs"] and out["floors"]["levels_with_slabs"] < lv_count:
+        out["verdict"].append("樓板覆蓋不完整 → 不可用此模型計算面積或 GFA")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def bim_floors(source: str, refresh: bool = False) -> str:
+    """Floor-slab inventory per level (bbox area = upper bound). source: SceneServer url or item id."""
+    d = _bim_rows(source, refresh)
+    rows = d["rows"]
+    floors = [r for r in rows if str(r.get("Category") or "").lower() in ("floors", "floor", "slab")]
+    per = {}
+    for r in floors:
+        k = str(r.get("BldgLevel_Desc") or r.get("BldgLevel"))
+        mbb = r.get("mbb") or []
+        area = (mbb[3] - mbb[0]) * (mbb[4] - mbb[1]) if len(mbb) == 6 else 0.0
+        e = per.setdefault(k, {"slabs": 0, "area_m2_bbox": 0.0})
+        e["slabs"] += 1
+        e["area_m2_bbox"] = round(e["area_m2_bbox"] + area, 1)
+    levels = {str(r.get("BldgLevel_Desc") or r.get("BldgLevel")) for r in rows}
+    return json.dumps({
+        "service": d["service"], "elements": len(rows), "slabs_total": len(floors),
+        "per_level": dict(sorted(per.items())),
+        "levels_present": len(levels), "levels_with_slabs": len(per),
+        "coverage_ok": len(per) == len(levels) and bool(floors),
+        "note": BIM_NOTE,
+    }, ensure_ascii=False)
+
+
+def bim_elements(source: str, where: str = "", limit: int = 20,
+                 group_by: str = "", refresh: bool = False) -> str:
+    """Filter BIM elements. where: 'Category=Walls' (equality, case-insensitive) or free text;
+    group_by: field name to count instead of listing. source: SceneServer url or item id."""
+    d = _bim_rows(source, refresh)
+    rows = d["rows"]
+    if where:
+        if "=" in where:
+            k, v = where.split("=", 1)
+            k, v = k.strip(), v.strip().lower()
+            hits = [r for r in rows if str(r.get(k, "")).lower() == v]
+        else:
+            q = where.lower()
+            hits = [r for r in rows if any(q in str(r.get(f, "")).lower() for f in d["fields"])]
+    else:
+        hits = rows
+    if group_by:
+        cnt = {}
+        for r in hits:
+            k = str(r.get(group_by))
+            cnt[k] = cnt.get(k, 0) + 1
+        pairs = sorted(cnt.items(), key=lambda t: -t[1])[:max(1, limit)]
+        return json.dumps({"service": d["service"], "matched": len(hits),
+                           "group_by": group_by, "rows": [{"value": k, "count": v} for k, v in pairs],
+                           "note": BIM_NOTE}, ensure_ascii=False)
+    slim = [{k: r.get(k) for k in ("id", "Category", "Family", "FamilyType", "BldgLevel", "Mark",
+                                   "lon", "lat")} for r in hits[:max(1, limit)]]
+    return json.dumps({"service": d["service"], "matched": len(hits), "returned": len(slim),
+                       "rows": slim, "note": BIM_NOTE}, ensure_ascii=False)
+
+
+def site_zoning(lat: float = 0.0, lon: float = 0.0, source: str = "", radius_m: int = 0) -> str:
+    """Statutory context for a BIM model or a point: OZP zone, height control, slopes, landslides.
+
+    Give source=<BIM scene url or item id> to use the model extent, or lat/lon + radius_m."""
+    d = None
+    if source:
+        d = _bim_rows(source)
+        bbox = _bim_bbox(d["rows"])
+        if not bbox:
+            raise ValueError("model has no positions")
+    else:
+        if not (lat and lon):
+            raise ValueError("pass source= or lat/lon")
+        dlat = max(radius_m, 50) / 111320.0
+        dlon = dlat / max(math.cos(math.radians(lat)), 1e-6)
+        bbox = [lon - dlon, lat - dlat, lon + dlon, lat + dlat]
+
+    zones = _hk_query(HK_ZONE, bbox, "PLAN_NO,ZONE_LABEL,DESC_ENG,DESC_CHT,SPUSE_ENG,SPUSE_CHT")
+    seen, zrows = set(), []
+    for z in zones:
+        key = (z.get("PLAN_NO"), z.get("ZONE_LABEL"))
+        if key in seen:
+            continue
+        seen.add(key)
+        zrows.append({"plan_no": z.get("PLAN_NO"), "zone": z.get("ZONE_LABEL"),
+                      "desc": z.get("DESC_ENG"),
+                      "permitted_use": (z.get("SPUSE_ENG") or "")[:200]})
+
+    bhc = _hk_query(HK_BHC, bbox, "PLAN_NO,BHC_TYPE,BHC_VALUE")
+    hrows = []
+    for b in bhc:
+        t, v = (b.get("BHC_TYPE") or ""), (b.get("BHC_VALUE") or "")
+        try:
+            val = float(v)
+        except (TypeError, ValueError):
+            val = None
+        if t == "BHCS":
+            hrows.append({"plan_no": b.get("PLAN_NO"), "type": "storeys", "value": val})
+        elif t == "BHCB":
+            hrows.append({"plan_no": b.get("PLAN_NO"), "type": "metres", "value": val})
+        else:
+            hrows.append({"plan_no": b.get("PLAN_NO"), "type": t, "value": val})
+
+    slopes = _hk_query(HK_SLOPE, bbox, "Identifier_of_the_Slope_Feature,District___地區")
+    slides = _hk_query(HK_LANDSLIDE, bbox, "SLIDE_TYPE,YEAR_1")
+
+    return json.dumps({
+        "bbox": [round(x, 6) for x in bbox],
+        "model": {"service": d["service"], "elements": len(d["rows"])} if d else None,
+        "zones": zrows,
+        "height_control": hrows[:30],
+        "registered_slopes": {"count": len(slopes),
+                              "sample": [s.get("Identifier_of_the_Slope_Feature") for s in slopes[:5]]},
+        "landslide_records": {"count": len(slides),
+                              "latest_year": max((s.get("YEAR_1") or 0) for s in slides) if slides else None},
+        "links": _links(bbox, d["service"] if d else ""),
+        "note": BIM_NOTE,
+    }, ensure_ascii=False)
+
+
+def lot_check(source: str, refresh: bool = False) -> str:
+    """Which lots does the model extent sit on (bbox level), plus height control.
+
+    bbox level only: a model can share a bbox with a neighbouring lot without touching it."""
+    d = _bim_rows(source, refresh)
+    bbox = _bim_bbox(d["rows"])
+    if not bbox:
+        raise ValueError("model has no positions")
+    lots = _hk_query(HK_LOT, bbox, "LOTID,LOTCSUID")
+    bhc = _hk_query(HK_BHC, bbox, "PLAN_NO,BHC_TYPE,BHC_VALUE")
+    zones = _hk_query(HK_ZONE, bbox, "PLAN_NO,ZONE_LABEL")
+    return json.dumps({
+        "bbox": [round(x, 6) for x in bbox],
+        "lots": {"count": len(lots), "sample": [l.get("LOTCSUID") for l in lots[:10]]},
+        "zone_labels": sorted({z.get("ZONE_LABEL") for z in zones if z.get("ZONE_LABEL")}),
+        "height_control_rows": len(bhc),
+        "precision": "bbox level — not a footprint intersection",
+        "links": _links(bbox, d["service"]),
+        "note": BIM_NOTE,
+    }, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------- MCP wiring
 
 def main():
@@ -1307,7 +1682,8 @@ def main():
     mcp = Server("hk-spatial")
     for fn in (search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
                geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
-               arcgis_request, publish_layer, dataset_status, spatial_join):
+               arcgis_request, publish_layer, dataset_status, spatial_join,
+               bim_audit, bim_floors, bim_elements, site_zoning, lot_check):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":
@@ -1416,6 +1792,38 @@ if __name__ == "__main__":
         assert a != b, (a, b)
         assert b"Selftest alpha" in _http(a) and b"Selftest beta" in _http(b)
         print(f"  stable maps -> {a.rsplit('/', 1)[-1]} + {b.rsplit('/', 1)[-1]} both alive")
-        print("selftest OK:", s["features"], "features,", out["url"])
+        # ---- BIM (i3s) + statutory checks
+        # codec: three page layouts that all exist in the wild
+        assert _i3s_decode(_struct.pack("<II", 2, 7) + _struct.pack("<2I", 3, 4) + b"AB\x00CDE\x00") \
+            == ["AB", "CDE"]
+        assert _i3s_decode(_struct.pack("<I", 2) + _struct.pack("<2i", 7, 9)) == [7, 9]
+        assert _i3s_decode(_struct.pack("<II", 2, 0) + _struct.pack("<2d", 1.5, 2.5)) == [1.5, 2.5]
+        assert _empty(0, "Mark") and not _empty(0, "BldgLevel")
+        bim_url = ("https://tiles.arcgis.com/tiles/V6ZHFr6zdgNZuVG0/arcgis/rest/services/"
+                   "Bldg_E_Color_UC2020_demo/SceneServer")
+        bm = json.loads(bim_audit(bim_url))
+        assert bm["elements"] == 24787, bm["elements"]
+        assert bm["completeness_pct"]["Mark"] > 99, bm["completeness_pct"]["Mark"]
+        assert bm["tags"]["duplicated"] >= 4, bm["tags"]
+        print(f"  bim audit   -> {bm['elements']} elements, Mark {bm['completeness_pct']['Mark']}% empty,"
+              f" {len(bm['verdict'])} findings")
+        fl = json.loads(bim_floors(bim_url))
+        assert fl["slabs_total"] == 9 and fl["coverage_ok"] is False, fl
+        print(f"  bim floors  -> {fl['slabs_total']} slabs on {fl['levels_with_slabs']}/"
+              f"{fl['levels_present']} levels, coverage_ok={fl['coverage_ok']}")
+        el = json.loads(bim_elements(bim_url, "Category=Doors", 5))
+        assert el["matched"] == 41 and el["returned"] == 5, el
+        gr = json.loads(bim_elements(bim_url, "", 3, "ElementType"))
+        assert gr["rows"] and gr["rows"][0]["count"] == 19705, gr["rows"][:2]
+        print(f"  bim query   -> {el['matched']} doors, top ElementType {gr['rows'][0]}")
+        sz = json.loads(site_zoning(lat=22.337, lon=114.175, radius_m=100))
+        assert any(z["zone"] == "OU" for z in sz["zones"]), sz["zones"][:3]
+        assert sz["bbox"][0] < 114.175 < sz["bbox"][2], sz["bbox"]
+        print(f"  site zoning -> {len(sz['zones'])} zones, {sz['zones'][0]['plan_no']} "
+              f"{sz['zones'][0]['zone']}, {sz['registered_slopes']['count']} slopes")
+        lots = _hk_query(HK_LOT, [114.170, 22.296, 114.178, 22.303], "LOTID,LOTCSUID")
+        assert len(lots) > 100, len(lots)
+        print(f"  lot query   -> {len(lots)} lots in a 0.008 deg box")
+        print("selftest OK:", s["features"], "features,", out["url"], "| BIM", bm["elements"], "elements")
     else:
         main()

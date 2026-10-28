@@ -1451,6 +1451,7 @@ def _bim_rows(source, refresh=False):
                 row[f] = c[i] if c and i < len(c) else None
             rows.append(row)
     out = {"service": service, "sublayer": meta.get("name"), "nodes": len(ids),
+           "layerType": meta.get("layerType") or "3DObject",
            "fields": fields, "rows": rows}
     fp.write_text(json.dumps(out))
     return out
@@ -1922,14 +1923,15 @@ def _findings_geojson(source, refresh=False):
               "properties": {k: r.get(k) for k in ("finding", "detail", "Category", "Family",
                                                    "FamilyType", "BldgLevel", "Mark", "id")}}
              for r in items]
-    return {"type": "FeatureCollection", "features": feats}, d["service"]
+    return {"type": "FeatureCollection", "features": feats}, d["service"], d.get("layerType") or "3DObject"
 
 
-def bim_findings(source: str, refresh: bool = False) -> str:
-    """Write the audit findings as GeoJSON + an interactive map page, ready to publish.
+def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
+    """Write the audit findings as GeoJSON plus a viewer page, ready to publish.
 
+    mode: "map" (2D MapView) or "scene" (3D SceneView with the BIM model itself).
     Findings are element-level and carry a reason: duplicate_mark, no_dimension, slab_coverage."""
-    gj, service = _findings_geojson(source, refresh)
+    gj, service, ltype = _findings_geojson(source, refresh)
     slug = _slug("bim-findings", [service.rsplit("/", 2)[-2][:28]])
     fp = WORK / f"{slug}.geojson"
     fp.write_text(json.dumps(gj))
@@ -1937,20 +1939,31 @@ def bim_findings(source: str, refresh: bool = False) -> str:
     for f in gj["features"]:
         k = f["properties"]["finding"]
         counts[k] = counts.get(k, 0) + 1
-    page = WORK / f"{slug}.html"
-    page.write_text(_FINDINGS_PAGE.format(
-        title="BIM Audit Findings", data_url=f"{slug}.geojson",
-        legend="".join(f'<li><span class="sw {k}"></span>{k} · {v}</li>' for k, v in counts.items()),
-        css="".join(f".sw.{k}{{background:{c}}}" for k, c in
-                    (("duplicate_mark", "#c53030"), ("no_dimension", "#b7791f"),
-                     ("slab_coverage", "#2b6cb0")))))
+    page = WORK / f"{slug}-{'3d' if mode == 'scene' else '2d'}.html"
+    colours = (("duplicate_mark", "#c53030"), ("no_dimension", "#b7791f"),
+               ("slab_coverage", "#2b6cb0"))
+    legend = "".join(f'<li><span class="sw {k}"></span>{k} · {v}</li>' for k, v in counts.items())
+    css = "".join(f".sw.{k}{{background:{c}}}" for k, c in colours)
+    if mode == "scene":
+        page.write_text(_SCENE_PAGE.format(
+            title="BIM Findings — 3D", data_url=f"{slug}.geojson",
+            service=service, legend=legend, css=css,
+            symbols="".join(
+                f'{{ value: "{k}", symbol: {{ type: "point-3d", symbolLayers: [{{ type: "object", '
+                f'resource: {{ primitive: "cylinder" }}, material: {{ color: "{c}" }}, '
+                f'height: 22, width: 3, anchor: "bottom" }}] }} }},'
+                for k, c in colours)))
+    else:
+        page.write_text(_FINDINGS_PAGE.format(
+            title="BIM Audit Findings", data_url=f"{slug}.geojson", legend=legend, css=css))
     return json.dumps({
         "service": service,
+        "mode": mode,
         "findings": len(gj["features"]),
         "by_type": counts,
         "geojson_file": str(fp),
-        "map_url": f"http://localhost:{PORT}/{slug}.html",
-        "map_file": str(page),
+        "viewer_url": f"http://localhost:{PORT}/{page.name}",
+        "viewer_file": str(page),
         "note": BIM_NOTE,
     }, ensure_ascii=False)
 
@@ -1970,6 +1983,67 @@ def publish_findings(source: str, title: str = "BIM Audit Findings", refresh: bo
         "status": "prepared, not published",
     }, ensure_ascii=False)
 
+
+_SCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
+<link rel="stylesheet" href="https://js.arcgis.com/4.31/esri/themes/light/main.css">
+<style>
+ html,body,#view {{ margin:0; height:100%; font-family:-apple-system,"Noto Sans CJK TC",Arial,sans-serif; }}
+ #panel {{ position:absolute; top:14px; right:14px; z-index:9; background:rgba(255,255,255,.95);
+   padding:12px 14px; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.25); font-size:12px; color:#1a202c; }}
+ #panel h4 {{ margin:0 0 6px; font-size:12px; color:#1a365d; letter-spacing:.04em; }}
+ #panel ul {{ list-style:none; margin:0; padding:0; }}
+ #panel li {{ margin:3px 0; }}
+ .sw {{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }}
+ #hint {{ position:absolute; left:14px; bottom:14px; z-index:9; background:rgba(26,54,93,.9); color:#fff;
+   padding:8px 12px; border-radius:4px; font-size:11px; }}
+{css}
+</style></head><body>
+<div id="view"></div>
+<div id="panel"><h4>BIM FINDINGS · 3D</h4><ul>{legend}</ul>
+<div style="margin-top:8px;color:#c53030;font-size:11px">柱高 22 m，僅作定位提示，非實際構件</div>
+<div style="margin-top:6px;color:#4a5568">Powered by Esri</div></div>
+<div id="hint">拖曳旋轉 · 滾輪縮放 · 右鍵平移</div>
+<script src="https://js.arcgis.com/4.31/"></script>
+<script>
+require(["esri/Map","esri/views/SceneView","esri/layers/BuildingSceneLayer","esri/layers/SceneLayer",
+         "esri/layers/GeoJSONLayer"],
+function(Map, SceneView, BuildingSceneLayer, SceneLayer, GeoJSONLayer) {{
+  const url = "{service}";
+  const findings = new GeoJSONLayer({{
+    url: new URL("{data_url}", window.location.href).href,
+    title: "Findings",
+    elevationInfo: {{ mode: "on-the-ground" }},
+    popupTemplate: {{
+      title: "{{finding}}",
+      content: "{{detail}}<br/>Category: {{Category}}<br/>Type: {{FamilyType}}<br/>Level: {{BldgLevel}}<br/>Mark: {{Mark}}"
+    }},
+    renderer: {{ type: "unique-value", field: "finding", uniqueValueInfos: [{symbols}] }}
+  }});
+  const map = new Map({{ basemap: "satellite", ground: "world-elevation", layers: [findings] }});
+  const view = new SceneView({{ container: "view", map: map,
+    camera: {{ position: {{ latitude: 34.0587, longitude: -117.1974, z: 900 }}, tilt: 65 }} }});
+
+  // A Building Scene Layer needs BuildingSceneLayer; a 3D object layer needs SceneLayer.
+  // Try the richer one first and swap on failure — no server-side detection needed.
+  const bim = new BuildingSceneLayer({{ url: url, title: "BIM model", popupEnabled: false }});
+  map.add(bim);
+  bim.load().then(() => {{
+    window.__layerKind = "BuildingSceneLayer";
+    if (bim.fullExtent) view.goTo({{ target: bim.fullExtent, tilt: 65 }}, {{ animate: false }});
+  }}).catch(() => {{
+    map.remove(bim);
+    const alt = new SceneLayer({{ url: url, title: "BIM model", popupEnabled: false }});
+    map.add(alt);
+    alt.load().then(() => {{
+      window.__layerKind = "SceneLayer";
+      if (alt.fullExtent) view.goTo({{ target: alt.fullExtent, tilt: 65 }}, {{ animate: false }});
+    }}).catch(() => {{ window.__layerKind = "failed"; }});
+  }});
+
+  window.__ready = false;
+  view.when(() => {{ window.__ready = true; }});
+}});
+</script></body></html>"""
 
 _FINDINGS_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
 <link rel="stylesheet" href="https://js.arcgis.com/4.31/esri/themes/light/main.css">
@@ -2025,11 +2099,14 @@ def main():
     except ImportError:
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
-    for fn in (search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
-               geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
-               arcgis_request, publish_layer, dataset_status, spatial_join,
-               bim_audit, bim_floors, bim_elements, site_zoning, lot_check,
-               bim_findings, bim_report, publish_findings):
+    bim_tools = (bim_audit, bim_floors, bim_elements, site_zoning, lot_check,
+                 bim_findings, bim_report, publish_findings)
+    tools = [search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
+             geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
+             arcgis_request, publish_layer, dataset_status, spatial_join]
+    if (os.environ.get("HK_MCP_BIM") or "1").strip().lower() not in ("0", "false", "off", "no"):
+        tools += list(bim_tools)          # HK_MCP_BIM=0 → CSDI-only server, same install
+    for fn in tools:
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":

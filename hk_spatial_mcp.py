@@ -1673,6 +1673,350 @@ def lot_check(source: str, refresh: bool = False) -> str:
     }, ensure_ascii=False)
 
 
+def _print_pdf(html_path, pdf_path, timeout=120):
+    """Chromium headless print. Returns the pdf path, or None when no browser is available."""
+    import shutil
+    import subprocess
+    for exe in ("chromium-browser", "chromium", "google-chrome", "chrome"):
+        if not shutil.which(exe):
+            continue
+        try:
+            subprocess.run([exe, "--headless", "--no-sandbox", "--disable-gpu",
+                            "--no-pdf-header-footer", f"--print-to-pdf={pdf_path}",
+                            f"file://{html_path}"], check=True, timeout=timeout,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if pdf_path.exists() and pdf_path.stat().st_size > 1000:
+                return pdf_path
+        except Exception:
+            continue
+    return None
+
+
+_REPORT_CSS = """
+@page { size: A4; margin: 20mm 18mm 18mm 18mm; }
+* { box-sizing: border-box; }
+body { font-family: "Noto Sans CJK TC","Noto Sans CJK SC","Helvetica Neue",Arial,sans-serif;
+       color:#1a202c; font-size:10.5pt; line-height:1.55; margin:0; }
+.cover { page-break-after: always; padding-top: 34mm; }
+.cover .bar { height:8mm; background:#1a365d; margin:0 -18mm 0 -18mm; }
+.cover .gold { height:2.4mm; background:#c9a84c; margin:0 -18mm 0 -18mm; }
+.cover h1 { font-size:26pt; color:#1a365d; margin:18mm 0 4mm 0; line-height:1.2; }
+.cover h2 { font-size:12pt; color:#4a5568; font-weight:400; margin:0 0 14mm 0; }
+.cover table { width:100%; border-collapse:collapse; font-size:9.5pt; }
+.cover td { padding:2.2mm 0; border-bottom:1px solid #e2e8f0; vertical-align:top; }
+.cover td:first-child { color:#4a5568; width:34%; }
+.verdict { margin-top:10mm; padding:5mm; border-left:4px solid #c9a84c; background:#faf7ef; }
+.verdict b { color:#1a365d; }
+h3 { font-size:13pt; color:#1a365d; border-bottom:1.6pt solid #c9a84c;
+     padding-bottom:1.6mm; margin:8mm 0 3.5mm 0; page-break-after:avoid; }
+h4 { font-size:10.5pt; color:#2b6cb0; margin:5mm 0 2mm 0; page-break-after:avoid; }
+table.d { width:100%; border-collapse:collapse; font-size:9pt; margin:2mm 0 4mm 0; }
+table.d th { background:#1a365d; color:#fff; text-align:left; padding:2mm 2.4mm; font-weight:600; }
+table.d td { padding:1.7mm 2.4mm; border-bottom:1px solid #e2e8f0; }
+table.d tr:nth-child(even) td { background:#f7fafc; }
+.num { text-align:right; font-variant-numeric: tabular-nums; }
+.tag { display:inline-block; padding:0.6mm 2mm; border-radius:2mm; font-size:8pt; font-weight:600; }
+.bad { background:#fde8e8; color:#9b1c1c; }
+.warn { background:#fdf6e3; color:#8a6d1f; }
+.ok { background:#e6f4ea; color:#1e6b3a; }
+.note { font-size:8.6pt; color:#4a5568; border-left:2.4pt solid #e2e8f0; padding-left:3mm; margin:3mm 0; }
+ul { margin:1.5mm 0 3mm 5mm; padding:0; }
+li { margin-bottom:1.4mm; }
+.foot { margin-top:8mm; font-size:8pt; color:#718096; border-top:1px solid #e2e8f0; padding-top:2.5mm; }
+a { color:#2b6cb0; text-decoration:none; word-break:break-all; }
+.two { display:flex; gap:6mm; }
+.two > div { flex:1; }
+"""
+
+
+def _report_html(a, fl, sz, generated):
+    def table(headers, rows, num_cols=()):
+        th = "".join(f"<th>{h}</th>" for h in headers)
+        body = ""
+        for r in rows:
+            cells = ""
+            for i, c in enumerate(r):
+                cls = ' class="num"' if i in num_cols else ""
+                cells += f"<td{cls}>{c}</td>"
+            body += f"<tr>{cells}</tr>"
+        return f'<table class="d"><thead><tr>{th}</tr></thead><tbody>{body}</tbody></table>'
+
+    total = a["elements"]
+    comp = a["completeness_pct"]
+    gaps = [f for f, p in comp.items() if p > 90]
+    verdict_rows = "".join(f"<li>{v}</li>" for v in a["verdict"]) or "<li>無重大資料問題</li>"
+    level_rows = [[f"Level {k}", f"{v:,}"] for k, v in
+                  sorted(a["levels"].items(), key=lambda t: (t[0] in ("None", ""), t[0]))]
+    comp_rows = []
+    for f, p in comp.items():
+        flag = '<span class="tag bad">未設定</span>' if p > 90 else (
+            '<span class="tag warn">部分</span>' if p > 10 else '<span class="tag ok">完整</span>')
+        comp_rows.append([f, f"{100 - p:.1f}%", f"{p:.1f}%", flag])
+    cat_rows = []
+    floor_rows = [[f"Level {k}", f'{v["slabs"]}', f'{v["area_m2_bbox"]:,.1f}'] for k, v in
+                  fl["per_level"].items()] or [["（無樓板）", "0", "0.0"]]
+
+    site_block = ""
+    if sz:
+        zone_rows = [[z["plan_no"], z["zone"], z["desc"]] for z in sz.get("zones", [])]
+        hc_rows = [[h["plan_no"], h["type"], ("" if h["value"] is None else f'{h["value"]:g}')]
+                   for h in sz.get("height_control", [])] or [["—", "—", "—"]]
+        site_block = f"""
+  <h3>5&nbsp;&nbsp;法定規劃背景</h3>
+  <p>模型範圍所處的法定圖則與地帶。界線以公開鏡像圖層計算，<b>並非</b>法定圖則的現行版本。</p>
+  {table(["圖則編號", "地帶", "英文描述"], zone_rows)}
+  <h4>建築物高度管制</h4>
+  {table(["圖則編號", "管制類型", "數值"], hc_rows)}
+  <div class="note">地帶內的准許用途須查閱該圖則的《註釋》（Notes）；本報告不作用途合規判斷。
+  已登記人造斜坡 <b>{sz.get('registered_slopes', {}).get('count', 0)}</b> 個，
+  天然山坡山泥傾瀉記錄 <b>{sz.get('landslide_records', {}).get('count', 0)}</b> 宗。</div>"""
+
+    checked = ["構件總數、樓層分佈、類別／族／類型目錄",
+               "欄位完整度、標識重複、樓板覆蓋"]
+    checked.append("模型範圍與分區計劃大綱圖、建築物高度管制區、已登記斜坡、山泥傾瀉記錄的空間對照"
+                   if sz else "（模型不在香港範圍，未套用本地法定圖層）")
+    return f"""<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8">
+<title>BIM 模型審核報告 — {a['sublayer'] or ''}</title><style>{_REPORT_CSS}</style></head><body>
+
+<div class="cover">
+  <div class="bar"></div><div class="gold"></div>
+  <h1>BIM 模型審核報告<br><span style="font-size:15pt;color:#2b6cb0">BIM Model Audit Report</span></h1>
+  <h2>ArcGIS i3s 場景圖層 · 資料完整性與法定規劃背景</h2>
+  <table>
+    <tr><td>模型圖層</td><td>{a['sublayer'] or '—'}</td></tr>
+    <tr><td>服務端點</td><td style="word-break:break-all">{a['service']}</td></tr>
+    <tr><td>構件總數</td><td><b>{total:,}</b></td></tr>
+    <tr><td>i3s 節點數</td><td>{a['nodes']}</td></tr>
+    <tr><td>報告日期</td><td>{generated}</td></tr>
+    <tr><td>資料來源</td><td>ArcGIS Online 場景服務（i3s 屬性頁）＋香港公開空間數據</td></tr>
+  </table>
+  <div class="verdict"><b>總結判斷</b><ul>{verdict_rows}</ul></div>
+</div>
+
+<h3>1&nbsp;&nbsp;摘要</h3>
+<p>本報告以程式直接讀取 i3s 場景圖層的節點屬性頁（該類服務沒有 SQL 查詢端點），
+逐件構件核對分類、樓層、標識與樓板覆蓋，並把模型範圍與法定規劃圖層對照。
+全部數字由模型自身資料產生，不含估算。</p>
+<div class="two">
+  <div><h4>模型概況</h4>{table(["項目", "數值"], [
+      ["構件總數", f"{total:,}"], ["樓層數", str(len(a["levels"]))],
+      ["類別 (Category)", str(a["catalogue"]["category"])],
+      ["族 (Family)", str(a["catalogue"]["family"])],
+      ["類型 (FamilyType)", str(a["catalogue"]["family_type"])],
+      ["樓板數量", str(a["floors"]["slabs"])]], (1,))}</div>
+  <div><h4>必須修正</h4><ul>
+    {"".join(f"<li>{f}：{comp[f]:.1f}% 未設定</li>" for f in gaps) or "<li>無</li>"}
+    <li>重複標識：{a["tags"]["duplicated"]} 個</li>
+    <li>樓板覆蓋：{a["floors"]["levels_with_slabs"]}/{a["floors"]["levels_total"]} 層</li>
+  </ul></div>
+</div>
+
+<h3>2&nbsp;&nbsp;模型清單</h3>
+<h4>各層構件數</h4>
+{table(["樓層", "構件數"], level_rows, (1,))}
+
+<h3>3&nbsp;&nbsp;資料完整性</h3>
+<p>以下為各屬性欄位的未設定比率。標識（Mark）為資產管理與工單系統的連接鍵，
+未設定即無法對接 FM。</p>
+{table(["欄位", "已填", "未設定", "狀態"], comp_rows, (1, 2))}
+<div class="note">判讀規則：同一標識出現多於一次即為重複，會令 join 產生歧義；
+本模型非空標識 <b>{a["tags"]["filled"]}</b> 個，其中 <b>{a["tags"]["duplicated"]}</b> 個重複。</div>
+
+<h3>4&nbsp;&nbsp;樓板覆蓋</h3>
+{table(["樓層", "樓板數", "面積 (m², bbox 上限)"], floor_rows, (1, 2))}
+<div class="note">面積為構件邊界盒（bbox）計算，屬<b>上限值</b>，並非實際樓板面積，
+亦不等同法定總樓面面積（GFA）。{"樓板覆蓋不完整，本模型不可用於任何面積計算。" if not fl["coverage_ok"] else "樓板覆蓋完整。"}</div>
+{site_block}
+
+<h3>{6 if sz else 5}&nbsp;&nbsp;方法與限制</h3>
+<h4>已核查</h4>
+<ul>
+  {"".join(f"<li>{c}</li>" for c in checked)}
+</ul>
+<h4>未核查（本方法無法判定）</h4>
+<ul>
+  <li>總樓面面積（GFA）、實際樓板面積（需幾何解算，且須符合法定定義）</li>
+  <li>逃生距離、隔火間面積、走廊淨闊（需完整幾何與拓撲）</li>
+  <li>碰撞檢測（構件級 bbox 不足以構成碰撞判定）</li>
+  <li>任何「合規」結論 — 本報告只提供事前篩查（pre-check）</li>
+</ul>
+<div class="note">分區計劃大綱圖與高度管制區在本報告中為<b>公開鏡像</b>，
+一切以城市規劃委員會／建築事務監督的現行法定文件為準。
+本報告由自動化流程產生，並非 Esri 官方產品。</div>
+
+<h3>{7 if sz else 6}&nbsp;&nbsp;附錄：線上檢視</h3>
+<p>Map Viewer（2D 範圍）：<br><a href="{a['links'].get('map_viewer', '')}">{a['links'].get('map_viewer', '—')}</a></p>
+<p>Scene Viewer（3D 模型）：<br><a href="{a['links'].get('scene_viewer', '')}">{a['links'].get('scene_viewer', '—')}</a></p>
+<div class="foot">BIM Model Audit Report · 由 hk-spatial-mcp 自動產生 · {generated} ·
+資料：ArcGIS Online 場景服務；香港公開空間數據（規劃署／地政總署／土木工程拓展署）</div>
+</body></html>"""
+
+
+def bim_report(source: str, site: bool = True, refresh: bool = False) -> str:
+    """Produce a professional PDF audit report for a BIM scene layer.
+
+    Reads the model over i3s, joins its extent to HK statutory layers, writes an A4 HTML report,
+    serves it on the local port and prints a PDF when a Chromium binary is present.
+    source: SceneServer url or AGOL item id."""
+    a = json.loads(bim_audit(source, refresh))
+    fl = json.loads(bim_floors(source, refresh))
+    sz = None
+    if site:
+        try:
+            sz = json.loads(site_zoning(source=source))
+            if not sz.get("zones"):
+                sz = None
+        except Exception:
+            sz = None
+    generated = time.strftime("%Y-%m-%d %H:%M")
+    html = _report_html(a, fl, sz, generated)
+    slug = _slug("bim-audit", [a["service"].rsplit("/", 2)[-2][:28]])
+    fp = WORK / f"{slug}.html"
+    fp.write_text(html)
+    pdf = _print_pdf(fp.resolve(), (WORK / f"{slug}.pdf").resolve())
+    return json.dumps({
+        "html_url": f"http://localhost:{PORT}/{slug}.html",
+        "html_file": str(fp),
+        "pdf_file": str(pdf) if pdf else None,
+        "pdf_url": f"http://localhost:{PORT}/{slug}.pdf" if pdf else None,
+        "pdf_bytes": pdf.stat().st_size if pdf else 0,
+        "sections": 7 if sz else 6,
+        "elements": a["elements"],
+        "site_context": bool(sz),
+        "note": BIM_NOTE,
+    }, ensure_ascii=False)
+
+
+def _findings(rows):
+    """Turn rows into a short, defensible finding list — each finding has a location and a reason."""
+    out = []
+    marks = {}
+    for r in rows:
+        m = r.get("Mark")
+        if not _empty(m, "Mark"):
+            marks.setdefault(str(m), []).append(r)
+    dup_ids = {id(r) for v in marks.values() if len(v) > 1 for r in v}
+    for r in rows:
+        if id(r) in dup_ids and r.get("lon") is not None:
+            out.append(dict(r, finding="duplicate_mark",
+                            detail=f"Mark {r.get('Mark')} 出現多於一次"))
+    for r in rows:
+        if str(r.get("Category") or "").lower() in ("doors", "door") and r.get("lon") is not None:
+            ft = str(r.get("FamilyType") or "")
+            if not re.search(r"\d", ft):
+                out.append(dict(r, finding="no_dimension",
+                                detail=f"門類型無尺寸：{ft or '(空)'}"))
+    for r in rows:
+        if str(r.get("Category") or "").lower() in ("floors", "floor", "slab") \
+                and r.get("lon") is not None:
+            out.append(dict(r, finding="slab_coverage",
+                            detail=f"樓板 Level {r.get('BldgLevel')}"))
+    return out
+
+
+def _findings_geojson(source, refresh=False):
+    d = _bim_rows(source, refresh)
+    items = _findings(d["rows"])
+    feats = [{"type": "Feature",
+              "geometry": {"type": "Point", "coordinates": [r["lon"], r["lat"]]},
+              "properties": {k: r.get(k) for k in ("finding", "detail", "Category", "Family",
+                                                   "FamilyType", "BldgLevel", "Mark", "id")}}
+             for r in items]
+    return {"type": "FeatureCollection", "features": feats}, d["service"]
+
+
+def bim_findings(source: str, refresh: bool = False) -> str:
+    """Write the audit findings as GeoJSON + an interactive map page, ready to publish.
+
+    Findings are element-level and carry a reason: duplicate_mark, no_dimension, slab_coverage."""
+    gj, service = _findings_geojson(source, refresh)
+    slug = _slug("bim-findings", [service.rsplit("/", 2)[-2][:28]])
+    fp = WORK / f"{slug}.geojson"
+    fp.write_text(json.dumps(gj))
+    counts = {}
+    for f in gj["features"]:
+        k = f["properties"]["finding"]
+        counts[k] = counts.get(k, 0) + 1
+    page = WORK / f"{slug}.html"
+    page.write_text(_FINDINGS_PAGE.format(
+        title="BIM Audit Findings", data_url=f"{slug}.geojson",
+        legend="".join(f'<li><span class="sw {k}"></span>{k} · {v}</li>' for k, v in counts.items()),
+        css="".join(f".sw.{k}{{background:{c}}}" for k, c in
+                    (("duplicate_mark", "#c53030"), ("no_dimension", "#b7791f"),
+                     ("slab_coverage", "#2b6cb0")))))
+    return json.dumps({
+        "service": service,
+        "findings": len(gj["features"]),
+        "by_type": counts,
+        "geojson_file": str(fp),
+        "map_url": f"http://localhost:{PORT}/{slug}.html",
+        "map_file": str(page),
+        "note": BIM_NOTE,
+    }, ensure_ascii=False)
+
+
+def publish_findings(source: str, title: str = "BIM Audit Findings", refresh: bool = False) -> str:
+    """Publish the findings to ArcGIS Online as a hosted point layer (needs ARCGIS_TOKEN)."""
+    tok = _token()
+    gj, service = _findings_geojson(source, refresh)
+    if not tok:
+        return _no_token("publish_findings")
+    slug = _slug("bim-findings", [service.rsplit("/", 2)[-2][:28]])
+    fp = WORK / f"{slug}.geojson"
+    fp.write_text(json.dumps(gj))
+    return json.dumps({
+        "prepared": str(fp), "features": len(gj["features"]),
+        "next": "POST /content/users/<user>/addItem (geojson → publish) — needs a verified org account",
+        "status": "prepared, not published",
+    }, ensure_ascii=False)
+
+
+_FINDINGS_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
+<link rel="stylesheet" href="https://js.arcgis.com/4.31/esri/themes/light/main.css">
+<style>
+ html,body,#view {{ margin:0; height:100%; font-family:-apple-system,"Noto Sans CJK TC",Arial,sans-serif; }}
+ #panel {{ position:absolute; top:14px; right:14px; z-index:9; background:#fff; padding:12px 14px;
+   border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.18); font-size:12px; color:#1a202c; }}
+ #panel h4 {{ margin:0 0 6px; font-size:12px; color:#1a365d; letter-spacing:.04em; }}
+ #panel ul {{ list-style:none; margin:0; padding:0; }}
+ #panel li {{ margin:3px 0; }}
+ .sw {{ display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }}
+{css}
+</style></head><body>
+<div id="view"></div>
+<div id="panel"><h4>BIM AUDIT FINDINGS</h4><ul>{legend}</ul>
+<div style="margin-top:8px;color:#4a5568">Powered by Esri</div></div>
+<script src="https://js.arcgis.com/4.31/"></script>
+<script>
+require(["esri/Map","esri/views/MapView","esri/layers/GeoJSONLayer"], function(Map, MapView, GeoJSONLayer) {{
+  const layer = new GeoJSONLayer({{
+    url: new URL("{data_url}", window.location.href).href,
+    title: "Findings",
+    popupTemplate: {{
+      title: "{{finding}}",
+      content: "{{detail}}<br/>Category: {{Category}}<br/>Type: {{FamilyType}}<br/>Level: {{BldgLevel}}<br/>Mark: {{Mark}}"
+    }},
+    renderer: {{
+      type: "unique-value", field: "finding",
+      uniqueValueInfos: [
+        {{ value: "duplicate_mark", symbol: {{ type: "simple-marker", color: "#c53030", size: 9, outline: {{ color: "#fff", width: 1 }} }} }},
+        {{ value: "no_dimension", symbol: {{ type: "simple-marker", color: "#b7791f", size: 8, outline: {{ color: "#fff", width: 1 }} }} }},
+        {{ value: "slab_coverage", symbol: {{ type: "simple-marker", color: "#2b6cb0", size: 10, outline: {{ color: "#fff", width: 1 }} }} }}
+      ]
+    }}
+  }});
+  const map = new Map({{ basemap: "streets-navigation-vector", layers: [layer] }});
+  const view = new MapView({{ container: "view", map: map, zoom: 17, center: [114.17, 22.32] }});
+  layer.when(() => {{
+    if (layer.fullExtent) view.goTo(layer.fullExtent.expand(1.4));
+    try {{ view.popup.dockEnabled = false; }} catch (e) {{}}
+  }});
+  window.__ready = false;
+  view.when(() => {{ window.__ready = true; }});
+}});
+</script></body></html>"""
+
+
 # ---------------------------------------------------------------- MCP wiring
 
 def main():
@@ -1684,7 +2028,8 @@ def main():
     for fn in (search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
                geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
                arcgis_request, publish_layer, dataset_status, spatial_join,
-               bim_audit, bim_floors, bim_elements, site_zoning, lot_check):
+               bim_audit, bim_floors, bim_elements, site_zoning, lot_check,
+               bim_findings, bim_report, publish_findings):
         mcp.tool()(fn)
     transport = (os.environ.get("HK_MCP_TRANSPORT") or "stdio").strip().lower()
     if transport == "stdio":

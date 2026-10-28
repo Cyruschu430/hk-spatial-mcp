@@ -1373,7 +1373,11 @@ def _bim_service(source):
 
 
 def _bim_sublayer(service):
-    """pick the 3DObject sublayer with the most attributes (BSL: one per discipline)"""
+    """pick the sublayer that actually holds geometry: nodes first, then attribute count.
+
+    A Building Scene Layer exposes 'Full Model' *and* 'Overview'; the former often has no
+    metadata at all (layerType null, 0 attributes). Counting nodes is what tells them apart.
+    """
     doc = json.loads(_i3s_get(_with_token(service + "?f=json")))
     best = None
     for layer in doc.get("layers", []) or []:
@@ -1385,7 +1389,12 @@ def _bim_sublayer(service):
                 continue
             if meta.get("layerType") != "3DObject":
                 continue
-            score = len(meta.get("attributeStorageInfo") or [])
+            try:
+                page = json.loads(_i3s_get(_with_token(f"{base}/nodepages/0")))
+                nodes = len(page.get("nodes") or [])
+            except Exception:
+                nodes = 0
+            score = (nodes, len(meta.get("attributeStorageInfo") or []))
             if best is None or score > best[0]:
                 best = (score, base, meta)
     if not best:
@@ -1534,6 +1543,9 @@ def bim_audit(source: str, refresh: bool = False) -> str:
         out["verdict"].append(f"{dup} 個 Mark 重複 → join 會產生歧義")
     if out["floors"]["slabs"] and out["floors"]["levels_with_slabs"] < lv_count:
         out["verdict"].append("樓板覆蓋不完整 → 不可用此模型計算面積或 GFA")
+    if not out["catalogue"]["category"]:
+        out["verdict"].append("無 Category／Family 分類 → 唔係 element-level BIM（外殼或 LOD 匯出），"
+                              "只可以做視覺化，唔可以做資產審核")
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -1947,18 +1959,23 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
     if mode == "scene":
         lons = [f["geometry"]["coordinates"][0] for f in gj["features"]]
         lats = [f["geometry"]["coordinates"][1] for f in gj["features"]]
+        if not lons:                       # no findings: fall back to the model extent
+            rows = _bim_rows(source, refresh)["rows"]
+            lons = [r["lon"] for r in rows if r.get("lon") is not None]
+            lats = [r["lat"] for r in rows if r.get("lat") is not None]
         if lons:
-            cx, cy = (min(lons) + max(lons)) / 2, (min(lats) + max(lats)) / 2
-            span_m = max((max(lats) - min(lats)) * 111320,
-                         (max(lons) - min(lons)) * 111320 * math.cos(math.radians(cy)), 30)
+            xmin, xmax, ymin, ymax = min(lons), max(lons), min(lats), max(lats)
+            cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
         else:
-            cx, cy, span_m = 114.17, 22.32, 200
+            cx, cy = 114.17, 22.32
+            xmin, xmax, ymin, ymax = cx - 0.002, cx + 0.002, cy - 0.002, cy + 0.002
+        span_m = max((ymax - ymin) * 111320,
+                     (xmax - xmin) * 111320 * math.cos(math.radians(cy)), 30)
         page.write_text(_SCENE_PAGE.format(
             title="BIM Findings — 3D", data_url=f"{slug}.geojson",
             service=service, legend=legend, css=css,
             cam_lon=round(cx, 6), cam_lat=round(cy, 6),
-            xmin=round(min(lons), 6), ymin=round(min(lats), 6),
-            xmax=round(max(lons), 6), ymax=round(max(lats), 6),
+            cam_above=int(min(240, max(60, span_m * 2.5))),
             symbols="".join(
                 f'{{ value: "{k}", symbol: {{ type: "point-3d", symbolLayers: [{{ type: "object", '
                 f'resource: {{ primitive: "cylinder" }}, material: {{ color: "{c}" }}, '
@@ -2026,8 +2043,29 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
   const COLOURS = {{ duplicate_mark: "#c53030", no_dimension: "#b7791f", slab_coverage: "#2b6cb0" }};
   const gLayer = new GraphicsLayer({{ title: "Findings" }});
   const map = new Map({{ basemap: "satellite", ground: "world-elevation", layers: [gLayer] }});
-  const TARGET = {{ type: "extent", xmin: {xmin}, ymin: {ymin}, xmax: {xmax}, ymax: {ymax},
-                    spatialReference: {{ wkid: 4326 }} }};
+  const CAM = {{ longitude: {cam_lon}, latitude: {cam_lat}, heading: 25, tilt: 68, above: {cam_above} }};
+  // ponytail: camera z is metres above mean sea level, not above ground. Querying the
+  // ground height and adding a fixed offset is the only framing that survives a 388 m site.
+  let framed = false;
+  function frame() {{
+    // must never reject: a throw here would be caught by the layer's .catch and reported
+    // as "BIM failed to load" even though the model is fine
+    if (framed) return;
+    try {{
+      framed = true;
+      const put = (z) => {{
+        view.camera = {{ position: {{ longitude: CAM.longitude, latitude: CAM.latitude,
+                                     z: Math.round(z + CAM.above) }},
+                        tilt: CAM.tilt, heading: CAM.heading }};
+        window.__cam = {{ z: view.camera.position.z, tilt: view.camera.tilt }};
+      }};
+      const gv = view.groundView;
+      if (gv && gv.queryElevation) {{
+        gv.queryElevation({{ type: "point", longitude: CAM.longitude, latitude: CAM.latitude }})
+          .then(g => put(g.z)).catch(() => put(420));
+      }} else {{ put(420); }}
+    }} catch (e) {{ window.__frameError = String(e); }}
+  }}
   const view = new SceneView({{ container: "view", map: map,
     camera: {{ position: {{ latitude: {cam_lat}, longitude: {cam_lon}, z: 600 }}, tilt: 62 }} }});
 
@@ -2037,13 +2075,12 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
   bim.load().then(() => {{
     window.__layerKind = "BuildingSceneLayer";
     msg.textContent = "BIM: " + (bim.sublayers ? bim.sublayers.length : 0) + " sublayers";
-    view.goTo({{ target: TARGET, tilt: 62 }}, {{ animate: false }});
+    frame();   // no-op if already framed; the view.when() path is the reliable one
   }}).catch(() => {{
     map.remove(bim);
     const alt = new SceneLayer({{ url: "{service}", title: "BIM model" }});
     map.add(alt, 0);
-    alt.load().then(() => {{ window.__layerKind = "SceneLayer"; msg.textContent = "BIM: scene layer";
-      view.goTo({{ target: TARGET, tilt: 62 }}, {{ animate: false }}); }})
+    alt.load().then(() => {{ window.__layerKind = "SceneLayer"; msg.textContent = "BIM: scene layer"; frame(); }})
       .catch(() => {{ window.__layerKind = "failed"; msg.textContent = "BIM 載入失敗"; }});
   }});
 
@@ -2068,7 +2105,7 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
   }});
 
   window.__ready = false;
-  view.when(() => {{ window.__ready = true; }});
+  view.when(() => {{ frame(); setTimeout(frame, 1500); window.__ready = true; }});
 }});
 </script></body></html>"""
 
@@ -2113,7 +2150,7 @@ require(["esri/Map","esri/views/MapView","esri/layers/GeoJSONLayer"], function(M
     try {{ view.popup.dockEnabled = false; }} catch (e) {{}}
   }});
   window.__ready = false;
-  view.when(() => {{ window.__ready = true; }});
+  view.when(() => {{ frame(); setTimeout(frame, 1500); window.__ready = true; }});
 }});
 </script></body></html>"""
 

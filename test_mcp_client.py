@@ -12,7 +12,8 @@ EXPECTED = {"bim_findings", "bim_report", "publish_findings", "search_hk_data", 
             "geocode_address",
             "geometry_op", "elevation_at", "export_static_map", "export_static_svg", "arcgis_request",
             "publish_layer", "dataset_status", "spatial_join",
-            "bim_audit", "bim_floors", "bim_elements", "site_zoning", "lot_check"}
+            "bim_audit", "bim_floors", "bim_elements", "site_zoning", "lot_check",
+            "webscene_viewer", "publish_scene"}
 
 BIM = ("https://tiles.arcgis.com/tiles/V6ZHFr6zdgNZuVG0/arcgis/rest/services/"
        "Bldg_E_Color_UC2020_demo/SceneServer")
@@ -31,12 +32,15 @@ async def main():
             print("hits:", [h["title"] for h in payload["hits"]])
             assert payload["hits"], payload
             # the new BIM tools must work over the protocol, not just as functions
+            # counts are from the 18 discipline sublayers, not the 'Overview' copy: the
+            # disciplines sit two group levels down ('Full Model' -> 'Architectural' -> …)
+            # and were unreachable before sublayer enumeration recursed.
             bm = json.loads((await s.call_tool("bim_audit", {"source": BIM})).content[0].text)
-            assert bm["elements"] == 24787, bm["elements"]
+            assert bm["elements"] == 17237, bm["elements"]
             print("bim_audit:", bm["elements"], "elements,", bm["completeness_pct"]["Mark"],
                   "% Mark empty,", len(bm["verdict"]), "findings")
             fl = json.loads((await s.call_tool("bim_floors", {"source": BIM})).content[0].text)
-            assert fl["slabs_total"] == 9, fl
+            assert fl["slabs_total"] == 163, fl
             print("bim_floors:", fl["slabs_total"], "slabs, coverage_ok =", fl["coverage_ok"])
             sz = json.loads((await s.call_tool("site_zoning",
                                                {"lat": 22.337, "lon": 114.175, "radius_m": 100})).content[0].text)

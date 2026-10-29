@@ -9,6 +9,10 @@
 6. multi-sublayer merge must cover every discipline sublayer and exclude the duplicate
    'Overview' copy (GrandCentral: 9 real sublayers, 6,919 elements, exactly 757 Walls —
    the same count agol-bim-mcp reports)
+6b. legacy i3s 1.4-1.6 services inline the node tree in `nodes/root` and 404 on
+   `nodepages/0`; they must still read (was: 0 nodes -> false "not element-level BIM")
+6c. hosted Building layers nest disciplines under group sublayers; reading only the first
+   level leaves a 61-discipline model as one shell (HK_MCP_SLOW=1: ~12 min)
 7. the where grammar: AND / NOT / LIKE / IN / IS NULL / bare word
 8. bad filters return where_parse; zero matches return field_values hints
 
@@ -29,6 +33,10 @@ MEINAU = ("https://tiles.arcgis.com/tiles/PD34KSBxbKxXBglp/arcgis/rest/services/
           "BIM_STRUCTURE_PROJET_MEINAU_WM_v3/SceneServer")  # plain 3DObject layer, 0 sublayers
 ZCB_ITEM = "5275b4eda9a441d28b9b04925fbbf7b2"                # Zero Carbon Building (BSL, item id)
 GC_ITEM = "5ced7f09314e45578d1212d005ff3b19"
+BLDGE_FLOORS = ("https://tiles.arcgis.com/tiles/C9eaAQefzoUvxmZ5/arcgis/rest/services/"
+                "Floors/SceneServer")                          # i3s 1.6 (2018), children inlined
+CIC = ("https://services5.arcgis.com/BFucnLaN4NszOvuE/arcgis/rest/services/"
+       "PXXCICXXZZA/SceneServer")   # Building layer, 61 disciplines under group sublayers
 ZERO_ITEM = "5275b4eda9a441d28b9b04925fbbf7b2"  # hosted scene service (not a package)                 # GrandCentral_V2 Scene Package (.slpk)
 EV = "epd_rcd_1631080339740_69941"                           # 990 EV chargers (points)
 DIST = "had_rcd_1634523272907_75218"                         # 18 district boundaries (polygons)
@@ -103,6 +111,25 @@ async def main():
             print(f"6 merge      : {a['elements']} elements, {a['sublayers']} sublayers, "
                   f"coverage {cov['nodes_with_features']}/{cov['nodes']} nodes "
                   f"({cov.get('nodes_empty', 0)} structural empties)")
+
+            # 6b. legacy i3s 1.6: node tree inlined in the node documents, `nodepages/0` 404s.
+            #     Building E (2018 trade services) has 7 floor slabs over levels 1,3,4,5.
+            a = await call("bim_audit", {"source": BLDGE_FLOORS})
+            assert "error" not in a, a
+            assert a["elements"] == 7 and a["sublayers"] == 1, (a["elements"], a["sublayers"])
+            assert not any("element-level" in v for v in a.get("verdict") or []), a["verdict"]
+            fl = await call("bim_floors", {"source": BLDGE_FLOORS})
+            assert fl["slabs_total"] == 7 and fl["coverage_ok"], fl
+            print(f"6b legacy    : i3s 1.6 tree, {a['elements']} slabs, "
+                  f"levels {sorted(fl['per_level'])}")
+
+            # 6c. nested group sublayers: CIC (Kai Tak) publishes 61 disciplines two levels
+            #     down ('Full Model' -> 'Structural' -> Beams). Slow (~12 min, 1,897 nodes),
+            #     so opt-in; the counts are the measured totals.
+            if os.environ.get("HK_MCP_SLOW"):
+                a = await call("bim_audit", {"source": CIC})
+                assert a["sublayers"] == 61 and a["elements"] == 40283, (a["sublayers"], a["elements"])
+                print(f"6c nested    : {a['sublayers']} sublayers, {a['elements']} elements")
 
             # 7. where grammar (counts verified against agol-bim-mcp / direct runs)
             expect = {"Category=Walls AND BldgLevel=20": 8, "BldgLevel IN (10, 20)": 78,

@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import secrets
+import socket
 import threading
 import time
 import urllib.error
@@ -1801,6 +1802,58 @@ def _bim_service(source):
     raise ValueError("pass a SceneServer url or a 32-char AGOL item id")
 
 
+def _legacy_node_ids(base):
+    """Node ids of an i3s 1.4–1.6 layer, where the tree is inlined in the node documents.
+
+    Those services carry `rootNode: ./nodes/root` and answer 404 on `nodepages/{n}`; the
+    only way in is walking `children` level by level. Per-node resources (`features/0`,
+    `attributes/f_N/0`) are identical to the 1.7 layout, so callers need no other change.
+    """
+    def doc(nid):
+        try:
+            return json.loads(_i3s_get(_with_token(f"{base}/nodes/{nid}")))
+        except Exception:
+            return {}
+
+    ids, seen, level = [], set(), [("root", doc("root"))]
+    with _Pool(10) as ex:
+        while level:
+            nxt = []
+            for nid, d in level:
+                if nid in seen:
+                    continue
+                seen.add(nid)
+                ids.append(nid)
+                nxt += [c["id"] for c in (d.get("children") or []) if c.get("id")]
+            nxt = [n for n in dict.fromkeys(nxt) if n not in seen]
+            level = list(zip(nxt, ex.map(doc, nxt))) if nxt else []
+    return ids
+
+
+def _bim_node_ids(base):
+    """(node ids, layout) for one (sub)layer, whichever i3s generation published it.
+
+    1.7+ lists nodes in `nodepages/{n}`; 1.4–1.6 inlines them in the node documents and
+    404s on nodepages (Building E, the 2018 trade services, is 1.6). Reporting 0 nodes for
+    a readable layer turns into a false "not element-level BIM" verdict, so fall back.
+    """
+    ids = []
+    for page in range(200):
+        try:
+            d = json.loads(_i3s_get(_with_token(f"{base}/nodepages/{page}")))
+        except Exception:
+            break
+        if not d.get("nodes"):
+            break
+        ids += [x["index"] for x in d["nodes"]]
+    if ids:
+        return ids, "nodepages"
+    if base.startswith("slpk://"):
+        return [], "none"          # packages fall back to the zip directory instead
+    legacy = _legacy_node_ids(base)
+    return legacy, ("nodes-tree" if legacy else "none")
+
+
 def _bim_sublayers(service, report=None):
     """All 3DObject (sub)layers that actually hold geometry, best first: (base, meta) pairs.
 
@@ -1821,10 +1874,22 @@ def _bim_sublayers(service, report=None):
         cands = []
         for layer in doc.get("layers", []) or []:
             subs = layer.get("sublayers") or []
-            if subs:
-                cands += [f"{service}/layers/{layer['id']}/sublayers/{s['id']}" for s in subs]
-            else:
+            if not subs:
                 cands.append(f"{service}/layers/{layer['id']}")
+                continue
+
+            def leaves(nodes, lid=layer["id"]):
+                # A Building layer nests disciplines under group sublayers
+                # ('Full Model' -> 'Structural' -> Beams); only leaves hold geometry.
+                # Sublayer ids are global across the tree, so the URL depth never changes.
+                for s in nodes or []:
+                    kids = s.get("sublayers") or []
+                    if kids or s.get("layerType") == "group":
+                        leaves(kids)
+                    else:
+                        cands.append(f"{service}/layers/{lid}/sublayers/{s['id']}")
+
+            leaves(subs)
     scored = []
     for base in cands:
         try:
@@ -1838,11 +1903,7 @@ def _bim_sublayers(service, report=None):
                 report.append({"base": base, "name": meta.get("name"),
                                "reason": f"layerType is {meta.get('layerType')}, not 3DObject"})
             continue
-        try:
-            page = json.loads(_i3s_get(_with_token(f"{base}/nodepages/0")))
-            nodes = len(page.get("nodes") or [])
-        except Exception:
-            nodes = 0
+        nodes = len(_bim_node_ids(base)[0])
         scored.append(((nodes, len(meta.get("attributeStorageInfo") or [])), base, meta))
     if not scored:
         raise ValueError("no 3DObject sublayer found")
@@ -1874,7 +1935,7 @@ def _bim_sublayer(service):
 
 
 _BIM_ROWS_V = 5   # v5: coverage splits structural empties from real failures
-_BIM_LAYER_V = 4  # v4: + per-sublayer coverage (empty vs failed) and pos_wkid
+_BIM_LAYER_V = 5  # v5: + i3s 1.4-1.6 node-tree fallback (stale 0-node caches must expire)
 
 
 def _reproject_rows(rows, wkid):
@@ -1916,18 +1977,10 @@ def _bim_layer_rows(base, meta, refresh=False):
             return d
     info = {a["name"]: a["key"] for a in meta.get("attributeStorageInfo") or []}
     fields = [f for f in BIM_FIELDS if f in info]
-    ids, page = [], 0
-    while page < 200:
-        try:
-            doc = json.loads(_i3s_get(_with_token(f"{base}/nodepages/{page}")))
-        except Exception:
-            break
-        if not doc.get("nodes"):
-            break
-        ids += [x["index"] for x in doc["nodes"]]
-        page += 1
+    ids, layout = _bim_node_ids(base)
     if not ids and base.startswith("slpk://"):
         ids = _slpk_node_ids(base)  # packages that only carry per-node resources, no index
+        layout = "zip" if ids else layout
 
     def feats(nid):
         # i3s interior nodes legitimately carry no features of their own (geometry lives
@@ -1979,7 +2032,7 @@ def _bim_layer_rows(base, meta, refresh=False):
         _reproject_rows(rows, int(wkid))
     attr_failed = {f: sum(1 for nid in active if data[f].get(nid) is None) for f in fields}
     out = {"v": _BIM_LAYER_V, "base": base, "sublayer": meta.get("name"), "nodes": len(ids),
-           "fields": fields, "pos_wkid": 4326, "source_wkid": wkid,
+           "i3s_layout": layout, "fields": fields, "pos_wkid": 4326, "source_wkid": wkid,
            "coverage": {"nodes": len(ids), "nodes_with_features": len(active),
                         **({"nodes_empty": n_empty} if n_empty else {}),
                         **({"nodes_failed": n_failed} if n_failed else {}),
@@ -3153,7 +3206,13 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         import tempfile
         globals()["WORK"] = pathlib.Path(tempfile.mkdtemp(prefix="hk-spatial-test-"))
-        globals()["PORT"] = 8799  # never reuse a live preview port, or the check hits another server
+        # Never reuse a live preview port, or the check silently hits another server: pick a
+        # free ephemeral one instead of a constant (8799 was taken on this machine and the
+        # fetch below 404'd against an unrelated app).
+        _s = socket.socket()
+        _s.bind(("127.0.0.1", 0))
+        globals()["PORT"] = _s.getsockname()[1]
+        _s.close()
         cat = _catalog()
         assert len(cat) > 1100, f"catalogue only {len(cat)} datasets — harvest incomplete"
         assert any(d["exportable"] for d in cat), "no exportable datasets in catalogue"
@@ -3248,19 +3307,21 @@ if __name__ == "__main__":
         bim_url = ("https://tiles.arcgis.com/tiles/V6ZHFr6zdgNZuVG0/arcgis/rest/services/"
                    "Bldg_E_Color_UC2020_demo/SceneServer")
         bm = json.loads(bim_audit(bim_url))
-        assert bm["elements"] == 24787, bm["elements"]
-        assert bm["completeness_pct"]["Mark"] > 99, bm["completeness_pct"]["Mark"]
+        # discipline sublayers, not the Overview copy: they nest under group sublayers and
+        # were unreachable before the enumeration recursed (Overview alone was 24,787)
+        assert bm["elements"] == 17237, bm["elements"]
+        assert bm["completeness_pct"]["Mark"] >= 99, bm["completeness_pct"]["Mark"]  # % empty
         assert bm["tags"]["duplicated"] >= 4, bm["tags"]
         print(f"  bim audit   -> {bm['elements']} elements, Mark {bm['completeness_pct']['Mark']}% empty,"
               f" {len(bm['verdict'])} findings")
         fl = json.loads(bim_floors(bim_url))
-        assert fl["slabs_total"] == 9 and fl["coverage_ok"] is False, fl
+        assert fl["slabs_total"] == 163 and fl["coverage_ok"] is False, fl
         print(f"  bim floors  -> {fl['slabs_total']} slabs on {fl['levels_with_slabs']}/"
               f"{fl['levels_present']} levels, coverage_ok={fl['coverage_ok']}")
         el = json.loads(bim_elements(bim_url, "Category=Doors", 5))
-        assert el["matched"] == 41 and el["returned"] == 5, el
+        assert el["matched"] == 256 and el["returned"] == 5, el
         gr = json.loads(bim_elements(bim_url, "", 3, "ElementType"))
-        assert gr["rows"] and gr["rows"][0]["count"] == 19705, gr["rows"][:2]
+        assert gr["rows"] and gr["rows"][0]["count"] == 13360, gr["rows"][:2]
         print(f"  bim query   -> {el['matched']} doors, top ElementType {gr['rows'][0]}")
         sz = json.loads(site_zoning(lat=22.337, lon=114.175, radius_m=100))
         assert any(z["zone"] == "OU" for z in sz["zones"]), sz["zones"][:3]

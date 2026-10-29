@@ -816,12 +816,19 @@ endpoint: `capabilities` may still advertise Query, but `/layers/{n}/query` answ
 Attributes live in per-node attribute pages; these tools read them straight over REST, no `arcgis`
 package, no ArcGIS Pro.
 
+Both i3s generations read the same way. 1.7+ lists nodes in `nodepages/{n}`; 1.4–1.6 (published before
+~2019) inlines the tree in `nodes/root` and answers 404 on nodepages. The reader tries one, then walks the
+other, so an old service is readable instead of reporting zero elements. Hosted Building layers nest
+their disciplines under group sublayers (`Full Model` → `Structural` → `Beams`); the walk recurses, so a
+61-discipline model reads whole — CIC `PXXCICXXZZA` is 61 sublayers / 40,283 elements / 1,897 nodes in
+~14 min uncached.
+
 - `bim_audit(source)` — elements, level profile, field completeness, duplicate tags, type catalogue,
   floor-slab coverage, and a plain-language verdict. `source` = SceneServer url or 32-char item id
   (a scene service or a Scene Package — `.slpk` downloads once, then reads from the local copy; a
   private package needs `ARCGIS_TOKEN`). Multi-discipline models are read whole: every sublayer with
   geometry is merged and each row carries a `sublayer` tag (the duplicate `Overview` copy is skipped).
-- `bim_floors(source)` — slabs per level, bbox area per level (upper bound), coverage flag.
+- `bim_floors(source)` — slabs per level, bbox area per level (read rule 2 before quoting it), coverage flag.
 - `bim_elements(source, where="Category=Doors AND BldgLevel=3", limit=20, group_by="ElementType")` —
   filter or count. `where` is a real expression: `= != > >= < <=`, `AND/OR/NOT`, `LIKE '%PANTRY%'`,
   `IN (a, b)`, `IS NULL`, or a bare word matched across every field; a zero-match answer lists the
@@ -833,11 +840,14 @@ Rules:
 
 1. Read once, reuse: the first call caches every row under `<work>/bim/`, per sublayer; pass
    `refresh=True` to re-read. A crash or a refresh only redoes the sublayers that need it.
-2. Never promise GFA, floor area, travel distance, compartment size or clash detection. Slab bbox area is
-   an upper bound, and only meaningful when `bim_floors().coverage_ok` is true.
+2. Never promise GFA, floor area, travel distance, compartment size or clash detection. `per_level[].area_m2_bbox`
+   is an upper bound **only if** the export publishes a bbox per feature; when it does not, every feature
+   in a node inherits the node's box (CIC: 410 slabs, 67 distinct boxes) and the per-level "area" sums
+   node boxes to ~15× the site. Count slabs; do not add areas.
 3. Report three states, never two: pass / fail / **cannot check** — and name the missing input.
 4. `Mark` filled at 0 means unset, not a tag. Over 90% empty ⇒ the model cannot drive asset tracking.
 5. Say which layer is a mirror: OZP and BHC here are public mirrors — the statutory plan prevails.
+6. `completeness_pct` is **% empty**, not % filled — `Mark: 86.0` means 14% of elements carry one.
 
 ## Licensing and attribution
 

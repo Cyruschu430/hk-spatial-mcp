@@ -68,8 +68,14 @@ BIM on ArcGIS is an i3s scene layer (`.slpk` / `/SceneServer`). There is **no** 
 advertise Query, but `/layers/{n}/query` answers `Invalid URL`. These tools read the attribute pages for
 you, so do not try to query a scene layer directly and do not install the `arcgis` package.
 
+Both i3s generations read the same way: 1.7+ lists nodes in `nodepages/{n}`, while 1.4–1.6 (anything
+published before ~2019) inlines the tree in `nodes/root` and answers 404 on nodepages — the reader tries
+one then the other, so an old service is not a dead end. Hosted Building layers nest disciplines under
+group sublayers ('Full Model' → 'Structural' → 'Beams'); all of them are merged, each row tagged with
+`sublayer`. A 61-discipline model is 1,897 nodes: the first read takes minutes, then it is cached.
+
 - `bim_audit(source)` → elements, levels, completeness, duplicate tags, catalogue, slab coverage, verdict.
-- `bim_floors(source)` → slabs per level + bbox area (an upper bound, not GFA).
+- `bim_floors(source)` → slabs per level + bbox area (see the area warning below).
 - `bim_elements(source, where="Category=Doors", limit=20, group_by="ElementType")` → filter or count.
 - `site_zoning(source=<model> | lat=…&lon=…)` → OZP zone, height control, slopes, landslides.
 - `lot_check(source)` → lots under the model extent (bbox level) + zone labels.
@@ -78,11 +84,17 @@ Workflow when someone hands you a model: `bim_audit` → `bim_floors` → `site_
 plus the `links.map_viewer` / `links.scene_viewer` pair. One read caches every row (`refresh=True` to
 re-read); a second call is instant.
 
-Never claim: GFA, floor area, travel distance, compartment size, clash detection, or "compliant". Slab
-bbox area is an upper bound and only meaningful when `bim_floors().coverage_ok` is true. Report pass /
-fail / **cannot check** — the third state is the honest one when geometry is missing. `Mark` of 0 means
-unset, not a tag; >90% empty means the model cannot drive asset tracking. OZP/BHC here are public
+Never claim: GFA, floor area, travel distance, compartment size, clash detection, or "compliant". Report
+pass / fail / **cannot check** — the third state is the honest one when geometry is missing. `Mark` of 0
+means unset, not a tag; >90% empty means the model cannot drive asset tracking. OZP/BHC here are public
 mirrors: the statutory plan prevails.
+
+Two field names lie, so quote the numbers with care:
+
+- `completeness_pct` is **% empty**, not % filled. `Mark: 86.0` means 14% of elements carry one.
+- `bim_floors().per_level[].area_m2_bbox` stays an upper bound only if the export publishes a bbox per
+  feature. When it does not, every feature in a node inherits the node's bbox (CIC: 410 slabs, 67
+  distinct boxes), and per-level "area" sums node boxes — 15× the site. Count slabs; do not add areas.
 
 ## Rules
 

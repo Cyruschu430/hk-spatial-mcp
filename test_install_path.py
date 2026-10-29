@@ -11,7 +11,7 @@ EXPECTED = ["search_hk_data", "load_hk_data", "query_hk_data", "summarise_hk_dat
             "geocode_address", "geometry_op", "elevation_at", "export_static_map", "export_static_svg",
             "arcgis_request", "publish_layer", "dataset_status", "spatial_join",
             "bim_audit", "bim_floors", "bim_elements", "site_zoning", "lot_check",
-            "bim_findings", "bim_report", "publish_findings"]
+            "bim_findings", "bim_report", "publish_findings", "publish_scene"]
 
 
 async def main():

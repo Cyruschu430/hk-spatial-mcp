@@ -1113,12 +1113,42 @@ def publish_layer(dataset_id: str, title: str = "", tags: str = "CSDI,Hong Kong"
     return json.dumps(_publish_geojson(src, title, tags), ensure_ascii=False)
 
 
+def _agol_user():
+    """The token's own AGOL username, or (None, raw reply) when the token is rejected."""
+    tok = _token()
+    me = json.loads(_redact(_http(f"{AGOL}/community/self?f=json&token={urllib.parse.quote(tok)}").decode()))
+    return me.get("username"), me
+
+
+def _await_publish(user, item_id, svc, tries=20, delay=6):
+    """Poll an async AGOL publish job to its final status -> (ok, error dict | None).
+
+    Scene jobs must be polled on the NEW service item: the source package item answers
+    'failed' for the same jobId even while the service builds fine (observed 2026-10-29),
+    so the service item is always preferred over the source item."""
+    tok = _token()
+    job = svc.get("jobId")
+    if not job:
+        return False, None
+    target = svc.get("serviceItemId") or item_id
+    for _ in range(tries):
+        st = json.loads(_redact(_http(
+            f"{AGOL}/content/users/{user}/items/{target}/status",
+            urllib.parse.urlencode({"jobId": job, "f": "json", "token": tok}).encode(),
+            timeout=60).decode()))
+        if st.get("status") == "completed":
+            return True, None
+        if st.get("status") == "failed":
+            return False, {"error": "publish job failed", "itemId": item_id, "detail": st}
+        time.sleep(delay)
+    return False, None
+
+
 def _publish_geojson(src, title, tags):
     """Upload a GeoJSON file and publish it as a hosted feature layer, polling the async
     publish job to its final status (verified end-to-end on 2026-10-29)."""
     tok = _token()
-    me = json.loads(_redact(_http(f"{AGOL}/community/self?f=json&token={urllib.parse.quote(tok)}").decode()))
-    user = me.get("username")
+    user, me = _agol_user()
     if not user:
         return {"error": "token rejected by ArcGIS Online", "detail": me}
     boundary = secrets.token_hex(12)
@@ -1139,23 +1169,97 @@ def _publish_geojson(src, title, tags):
                                      "layerName": title[:90]})}).encode(),
         timeout=300).decode()))
     svc = (pub.get("services") or [{}])[0]
-    job, ok = svc.get("jobId"), False
-    if job:
-        for _ in range(20):  # publish is async — poll until it settles (≤ ~2 min)
-            st = json.loads(_redact(_http(
-                f"{AGOL}/content/users/{user}/items/{item_id}/status",
-                urllib.parse.urlencode({"jobId": job, "f": "json", "token": tok}).encode(),
-                timeout=60).decode()))
-            if st.get("status") == "completed":
-                ok = True
-                break
-            if st.get("status") == "failed":
-                return {"error": "publish job failed", "itemId": item_id, "detail": st}
-            time.sleep(6)
+    ok, err = _await_publish(user, item_id, svc)
+    if err:
+        return err
     return {"itemId": item_id, "title": title,
             "item_url": f"https://www.arcgis.com/home/item.html?id={item_id}",
             "publish": ok, "service_url": svc.get("serviceurl"),
             "service_item_id": svc.get("serviceItemId")}
+
+
+def _find_owned_scene_service(user, sname):
+    """Item id of the caller's own hosted Scene Service whose URL ends in /<sname>/SceneServer."""
+    tok = _token()
+    srch = json.loads(_redact(_http(
+        f"{AGOL}/search?" + urllib.parse.urlencode(
+            {"q": f'owner:{user} AND type:"Scene Service"', "num": 100,
+             "f": "json", "token": tok}), timeout=60).decode()))
+    suffix = f"/{sname}/SceneServer"
+    for r in srch.get("results", []):
+        if (r.get("url") or "").rstrip("/").endswith(suffix):
+            return r["id"]
+    return None
+
+
+def publish_scene(source: str, title: str = "", refresh: bool = False) -> str:
+    """Publish a Scene Package as a hosted scene layer in YOUR ArcGIS Online content.
+
+    source: AGOL item id of a Scene Package (.slpk) — 3D Object and Building Scene Layer
+    packages both publish. The package is downloaded once into the local cache,
+    re-uploaded to your content, and published. The new scene service stays PRIVATE —
+    this tool never shares anything; share it yourself in ArcGIS Online.
+    Needs ARCGIS_TOKEN. Returns the hosted SceneServer url: pass it to bim_findings
+    (mode='scene') so the 3D viewer can draw the model, or to any other BIM tool.
+    """
+    if not _token():
+        return _no_token("publish_scene")
+    service = _bim_service(source)
+    if not service.startswith("slpk://"):
+        return json.dumps({"error": "publish_scene takes a Scene Package item id — "
+                           f"{service[:80]} is already a hosted scene service",
+                           "service": service}, ensure_ascii=False)
+    pkg_item = service[len("slpk://"):]
+    _slpk_zip(pkg_item)  # ensures the package bytes are cached locally
+    fp = WORK / "bim" / "slpk" / f"{pkg_item}.slpk"
+    tok = _token()
+    user, me = _agol_user()
+    if not user:
+        return json.dumps({"error": "token rejected by ArcGIS Online", "detail": me})
+    title = title or f"{_service_tag(pkg_item)} scene"
+    # hosted service names must be clean identifiers — a trailing/double underscore fails
+    # the publish job (observed 2026-10-29)
+    sname = (re.sub(r"_+", "_", re.sub(r"[^A-Za-z0-9_]", "_", title)).strip("_")
+             or "scene_layer")[:90]
+    clash = _find_owned_scene_service(user, sname)
+    if clash:
+        return json.dumps({"error": f"a hosted scene service named '{sname}' already exists in "
+                           "your content — delete it first or pass a different title (a duplicate "
+                           "service name makes the publish job fail silently)",
+                           "itemId": clash}, ensure_ascii=False)
+    boundary = secrets.token_hex(12)
+    body = _multipart(boundary, {"f": "json", "token": tok, "title": title,
+                                 "type": "Scene Package", "tags": "hk-spatial-mcp,BIM",
+                                 "fileName": fp.name},
+                      {"file": (fp.name, fp.read_bytes(), "application/octet-stream")})
+    add = json.loads(_redact(_http(f"{AGOL}/content/users/{user}/addItem", body,
+                                   {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                                   timeout=600).decode()))
+    if not add.get("success"):
+        return json.dumps({"error": "addItem failed", "detail": add})
+    pkg_id = add["id"]
+    pub = json.loads(_redact(_http(
+        f"{AGOL}/content/users/{user}/publish",
+        urllib.parse.urlencode({"itemId": pkg_id, "filetype": "scenepackage", "f": "json",
+                                "token": tok,
+                                # without outputType the publisher defaults to a feature
+                                # service and answers 500 'Unable to determine Service Type'
+                                "outputType": "sceneService",
+                                "publishParameters": json.dumps({"name": sname})}).encode(),
+        timeout=300).decode()))
+    svc = (pub.get("services") or [{}])[0]
+    if not svc.get("serviceurl") and not svc.get("jobId"):
+        return json.dumps({"error": "publish did not start", "itemId": pkg_id, "detail": pub})
+    ok, err = _await_publish(user, pkg_id, svc, tries=40, delay=15)  # scene jobs: minutes
+    if err:
+        return json.dumps(err)
+    return json.dumps({"itemId": pkg_id, "title": title,
+                       "item_url": f"https://www.arcgis.com/home/item.html?id={pkg_id}",
+                       "publish": ok, "service_url": svc.get("serviceurl"),
+                       "service_item_id": svc.get("serviceItemId"),
+                       "access": "private — this tool never shares items",
+                       "next": "pass service_url to bim_findings(mode='scene') for a 3D viewer "
+                               "that draws the model itself"}, ensure_ascii=False)
 
 
 def _multipart(boundary: str, fields: dict, files: dict) -> bytes:
@@ -2775,7 +2879,7 @@ def main():
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
     bim_tools = (bim_audit, bim_floors, bim_elements, site_zoning, lot_check,
-                 bim_findings, bim_report, publish_findings)
+                 bim_findings, bim_report, publish_findings, publish_scene)
     tools = [search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
              geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
              arcgis_request, publish_layer, dataset_status, spatial_join]

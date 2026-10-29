@@ -496,11 +496,21 @@ arcgis_request("<featureServiceUrl>/0/query", {"where": "1=1", "returnCountOnly"
 ### `publish_layer(dataset_id: str, title: str = "", tags: str = "CSDI,Hong Kong")`
 
 Uploads a dataset to ArcGIS Online as a hosted feature layer and returns the `itemId` and item URL.
+The async publish job is polled to completion; the reply carries the new `service_url`.
 Consumes organisation credits and storage capacity.
 
-**Authentication.** `arcgis_request` and `publish_layer` require `ARCGIS_TOKEN` set to a user or OAuth
-token. An ArcGIS API key is sufficient for basemaps and geocoding but cannot read or create
-organisation content.
+### `publish_scene(source: str, title: str = "")`  *(requires `ARCGIS_TOKEN`)*
+
+Publishes a Scene Package (`.slpk` item id) as a hosted scene layer in **your** content: the package
+bytes are downloaded once into the local cache, re-uploaded, and published. The resulting
+`service_url` answers every BIM tool — pass it to `bim_findings(mode="scene")` and the 3D viewer
+finally draws the model itself for package sources. 3D Object and Building Scene Layer packages
+both publish. The scene service is created **private**; this tool never shares anything, so a
+copied package stays visible to your account only until you share or delete it yourself.
+
+**Authentication.** `arcgis_request`, `publish_layer`, `publish_findings` and `publish_scene`
+require `ARCGIS_TOKEN` set to a user or OAuth token. An ArcGIS API key is sufficient for basemaps
+and geocoding but cannot read or create organisation content.
 
 ---
 

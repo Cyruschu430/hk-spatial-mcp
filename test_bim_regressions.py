@@ -28,7 +28,8 @@ HERE = pathlib.Path(__file__).resolve().parent
 MEINAU = ("https://tiles.arcgis.com/tiles/PD34KSBxbKxXBglp/arcgis/rest/services/"
           "BIM_STRUCTURE_PROJET_MEINAU_WM_v3/SceneServer")  # plain 3DObject layer, 0 sublayers
 ZCB_ITEM = "5275b4eda9a441d28b9b04925fbbf7b2"                # Zero Carbon Building (BSL, item id)
-GC_ITEM = "5ced7f09314e45578d1212d005ff3b19"                 # GrandCentral_V2 Scene Package (.slpk)
+GC_ITEM = "5ced7f09314e45578d1212d005ff3b19"
+ZERO_ITEM = "5275b4eda9a441d28b9b04925fbbf7b2"  # hosted scene service (not a package)                 # GrandCentral_V2 Scene Package (.slpk)
 EV = "epd_rcd_1631080339740_69941"                           # 990 EV chargers (points)
 DIST = "had_rcd_1634523272907_75218"                         # 18 district boundaries (polygons)
 
@@ -120,6 +121,35 @@ async def main():
             r = await call("bim_elements", {"source": GC_ITEM, "where": "Category=Nope", "limit": 1})
             assert r["matched"] == 0 and r["field_values"][0]["sample_values"], r
             print("8 hints      : where_parse + no-such-field + sample_values")
+
+            # 9. publish_scene e2e — token-gated; publishes GrandCentral as a PRIVATE hosted
+            #    scene layer, verifies it answers, then deletes both items (org hygiene).
+            if os.environ.get("ARCGIS_TOKEN"):
+                me = await call("arcgis_request", {"path": "community/self", "params": {}})
+                user = me.get("username")
+                assert user, me
+                # 9a. non-package sources are refused before any upload
+                r = await call("publish_scene", {"source": ZERO_ITEM})
+                assert "already a hosted scene service" in (r.get("error") or ""), r
+                # 9b. GrandCentral publishes end-to-end as a PRIVATE scene layer, then is deleted
+                #     (unique title: any residue from earlier failed runs can't collide)
+                import time as _time
+                p = await call("publish_scene", {
+                    "source": GC_ITEM,
+                    "title": f"regression-test scene {int(_time.time())} (delete me)"})
+                assert p.get("publish") and p.get("service_url"), p
+                chk = await call("arcgis_request", {
+                    "path": p["service_url"], "params": {"f": "json"}})
+                assert chk.get("layers"), chk
+                for iid in (p["service_item_id"], p["itemId"]):
+                    d = await call("arcgis_request", {
+                        "path": f"content/users/{user}/items/{iid}/delete",
+                        "params": {}, "method": "POST"})
+                    assert d.get("success"), d
+                print(f"9 scene      : refused non-package; published PRIVATE scene layer, "
+                      f"verified, deleted ({len(chk['layers'])} layers)")
+            else:
+                print("9 scene      : skipped (no ARCGIS_TOKEN in env)")
 
     print("bim regressions OK")
 

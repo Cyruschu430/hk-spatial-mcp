@@ -1228,10 +1228,14 @@ def publish_scene(source: str, title: str = "", refresh: bool = False) -> str:
                            "service name makes the publish job fail silently)",
                            "itemId": clash}, ensure_ascii=False)
     boundary = secrets.token_hex(12)
+    # the uploaded file name becomes the item NAME, and AGOL requires that to be unique per
+    # user folder — reusing the cached package's own name 409s on the second publish of the
+    # same model (observed 2026-10-29), so derive it from the unique service name instead.
+    # The multipart part filename is what AGOL reads, so set it in both places.
     body = _multipart(boundary, {"f": "json", "token": tok, "title": title,
                                  "type": "Scene Package", "tags": "hk-spatial-mcp,BIM",
-                                 "fileName": fp.name},
-                      {"file": (fp.name, fp.read_bytes(), "application/octet-stream")})
+                                 "fileName": f"{sname}.slpk"},
+                      {"file": (f"{sname}.slpk", fp.read_bytes(), "application/octet-stream")})
     add = json.loads(_redact(_http(f"{AGOL}/content/users/{user}/addItem", body,
                                    {"Content-Type": f"multipart/form-data; boundary={boundary}"},
                                    timeout=600).decode()))
@@ -1260,6 +1264,179 @@ def publish_scene(source: str, title: str = "", refresh: bool = False) -> str:
                        "access": "private — this tool never shares items",
                        "next": "pass service_url to bim_findings(mode='scene') for a 3D viewer "
                                "that draws the model itself"}, ensure_ascii=False)
+
+
+# ---- web scene viewer -------------------------------------------------------------
+
+_SCENE_LEAF = {"ArcGISSceneServiceLayer": "SceneLayer",
+               "IntegratedMeshLayer": "IntegratedMeshLayer"}
+
+
+def _webscene_leaves(layers, ancestors_visible=True, group=""):
+    """Flatten a web scene's operational layers to the leaves this viewer can draw."""
+    out = []
+    for lay in layers or []:
+        vis = ancestors_visible and bool(lay.get("visibility"))
+        kids = lay.get("layers")
+        if isinstance(kids, list) and kids:
+            out += _webscene_leaves(kids, vis, lay.get("title") or group)
+        elif lay.get("layerType") in _SCENE_LEAF and lay.get("url"):
+            url = lay["url"]
+            out.append({"title": lay.get("title") or url.rstrip("/").rsplit("/", 3)[-3],
+                        "url": url, "kind": _SCENE_LEAF[lay["layerType"]],
+                        "visible": vis, "group": group})
+    return out
+
+
+def _mercator_to_lonlat(x, y):
+    return (x / 20037508.342789244 * 180.0,
+            math.degrees(2 * math.atan(math.exp(y / 6378137.0)) - math.pi / 2))
+
+
+def webscene_viewer(item_id: str, refresh: bool = False) -> str:
+    """Draw an ArcGIS Web Scene in a local 3D viewer and open it in the browser.
+
+    item_id: a Web Scene item id (the .json document, not a scene layer). Every
+    operational layer this viewer understands — 3D object scene services and integrated
+    meshes — becomes a toggleable layer; the scene's own initial camera is reused, so the
+    building is framed on load. Point clouds, Gaussian splats and the scene's basemap are
+    skipped (the satellite basemap stands in). Private scene documents need ARCGIS_TOKEN.
+    Returns a localhost viewer url — layers that are publicly readable need no token.
+    """
+    fp = WORK / "bim" / "webscene" / f"{item_id}.json"
+    if refresh or not fp.exists():
+        q = {"f": "json"}
+        if _token():
+            q["token"] = _token()
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        fp.write_bytes(_http(f"{AGOL}/content/items/{item_id}/data?"
+                             + urllib.parse.urlencode(q), timeout=120))
+    data = json.loads(fp.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or "operationalLayers" not in data:
+        return json.dumps({"error": "not a web scene item (no operationalLayers)",
+                           "itemId": item_id}, ensure_ascii=False)
+    layers = _webscene_leaves(data.get("operationalLayers"))
+    if not layers:
+        return json.dumps({"error": "no drawable operational layers — supported layer types "
+                           "are 3D object scene services and integrated meshes",
+                           "itemId": item_id}, ensure_ascii=False)
+    cam = (((data.get("initialState") or {}).get("viewpoint") or {}).get("camera") or {})
+    pos = cam.get("position") or {}
+    if "x" in pos and "y" in pos:                     # web mercator camera
+        cam_lon, cam_lat = _mercator_to_lonlat(float(pos["x"]), float(pos["y"]))
+        cam_z = float(pos.get("z") or 500)
+    else:
+        cam_lon = float(pos.get("longitude") or 114.17)
+        cam_lat = float(pos.get("latitude") or 22.32)
+        cam_z = float(pos.get("z") or 500)
+    slug = _slug("webscene", [item_id[:8]])
+    page = WORK / f"{slug}.html"
+    checks = "".join(
+        f'<li><label><input type="checkbox" id="cb{i}"'
+        f'{" checked" if l["visible"] else ""}> {l["title"]}</label></li>'
+        for i, l in enumerate(layers))
+    page.write_text(_WEBSCENE_PAGE.format(
+        title=f"Web Scene — {item_id[:8]}", checks=checks,
+        layers_js=json.dumps([{k: l[k] for k in ("title", "url", "kind", "visible")}
+                              for l in layers], ensure_ascii=False),
+        cam_lon=round(cam_lon, 6), cam_lat=round(cam_lat, 6), cam_z=int(cam_z),
+        cam_heading=round(float(cam.get("heading") or 25), 1),
+        cam_tilt=round(float(cam.get("tilt") or 62), 1)), encoding="utf-8")
+    return json.dumps({
+        "itemId": item_id, "mode": "webscene",
+        "layers": len(layers),
+        "visible_on_load": sum(1 for l in layers if l["visible"]),
+        "viewer_url": f"http://localhost:{PORT}/{page.name}",
+        "viewer_file": str(page),
+        "note": "tick layers in the panel to add the BIM disciplines; skipped: point clouds, "
+                "gaussian splats, basemap layers",
+    }, ensure_ascii=False)
+
+
+_WEBSCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://js.arcgis.com/4.31/esri/themes/light/main.css">
+<style>
+ html,body,#view {{ margin:0; height:100%; font-family:-apple-system,"Noto Sans CJK TC",Arial,sans-serif; }}
+ #panel {{ position:absolute; top:14px; right:14px; z-index:9; background:#fff; padding:12px 14px;
+   border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.18); font-size:12px; color:#1a202c;
+   max-height:70vh; overflow:auto; width:230px; }}
+ #panel h4 {{ margin:0 0 6px; font-size:12px; color:#1a365d; letter-spacing:.04em; }}
+ #panel ul {{ list-style:none; margin:0; padding:0; }}
+ #panel li {{ margin:3px 0; }}
+ #panel label {{ cursor:pointer; }}
+ #panel button {{ margin-top:8px; width:100%; padding:5px 8px; border:1px solid #cbd5e0;
+   border-radius:4px; background:#f7fafc; color:#1a365d; font-size:11px; cursor:pointer; }}
+ #panel button:hover {{ background:#edf2f7; }}
+ #msg {{ position:absolute; left:14px; top:14px; z-index:9; background:rgba(0,0,0,.65); color:#fff;
+   padding:6px 10px; border-radius:4px; font-size:11px; }}
+</style></head><body>
+<div id="view"></div>
+<div id="panel"><h4>WEB SCENE · 3D</h4><ul>{checks}</ul>
+<button id="recentre" type="button" onclick="window.__recentre()">重設視角 · Re-centre</button>
+<div style="margin-top:8px;color:#4a5568">Powered by Esri</div></div>
+<div id="msg">載入中…</div>
+<script src="https://js.arcgis.com/4.31/"></script>
+<script>
+require(["esri/Map","esri/views/SceneView","esri/layers/SceneLayer","esri/layers/IntegratedMeshLayer"],
+function(Map, SceneView, SceneLayer, IntegratedMeshLayer) {{
+  const SPECS = {layers_js};
+  const msg = document.getElementById("msg");
+  const built = [];
+  let loaded = 0;
+  function bump() {{ msg.textContent = "已載入 " + loaded + "/" + SPECS.length; }}
+  const map = new Map({{ basemap: "satellite", ground: "world-elevation" }});
+  const view = new SceneView({{ container: "view", map: map,
+    camera: {{ position: {{ longitude: {cam_lon}, latitude: {cam_lat}, z: {cam_z} }},
+              heading: {cam_heading}, tilt: {cam_tilt} }} }});
+  SPECS.forEach(function (s, i) {{
+    try {{
+      const lyr = s.kind === "IntegratedMeshLayer"
+        ? new IntegratedMeshLayer({{ url: s.url, title: s.title }})
+        : new SceneLayer({{ url: s.url, title: s.title }});
+      lyr.visible = s.visible;
+      const cb = document.getElementById("cb" + i);
+      if (cb) cb.onchange = function () {{ lyr.visible = cb.checked; }};
+      lyr.when().then(function () {{ loaded++; bump(); }}).catch(function () {{
+        if (cb) {{ cb.disabled = true; cb.parentElement.style.opacity = .4; }}
+      }});
+      map.add(lyr, i);
+      built.push(lyr);
+    }} catch (e) {{}}
+  }});
+  // same framing rule as the findings viewer: centre the extent, derive the zoom from span
+  window.__fit = function (layer) {{
+    try {{
+      const e = layer && layer.fullExtent;
+      if (!e) return false;
+      if (e.spatialReference && e.spatialReference.wkid !== 4326) {{
+        view.goTo({{ target: e, tilt: 62 }}, {{ duration: 400 }}).catch(function () {{}});
+        return true;
+      }}
+      const cx = (e.xmin + e.xmax) / 2, cy = (e.ymin + e.ymax) / 2;
+      const coslat = Math.cos(cy * Math.PI / 180);
+      const spanM = Math.max((e.xmax - e.xmin) * 111320 * coslat, (e.ymax - e.ymin) * 111320);
+      const zoom = Math.max(14, Math.min(20, Math.log2(156543.03 * coslat / (spanM / 840))));
+      // center+zoom, animate:false — a point `target` with zoom silently no-ops and an
+      // animated goTo can be interrupted before it lands (both observed 2026-10-29)
+      view.goTo({{ center: [cx, cy], tilt: 62, heading: 25, zoom: zoom }}, {{ animate: false }})
+        .then(function () {{
+          window.__cam = {{ z: Math.round(view.camera.position.z),
+                          tilt: Math.round(view.camera.tilt) }};
+        }}).catch(function () {{}});
+      return true;
+    }} catch (err) {{ window.__frameError = String(err); return false; }}
+  }};
+  window.__recentre = function () {{
+    return window.__fit(built.filter(function (l) {{ return l.visible && l.fullExtent; }})[0]);
+  }};
+  window.__layers = built.length;
+  window.__view = view;      // debugging handle: view.takeScreenshot() and camera state
+  window.__ready = false;
+  view.when(function () {{ window.__recentre(); setTimeout(window.__recentre, 2500);
+    window.__ready = true; }});
+}});
+</script></body></html>"""
 
 
 def _multipart(boundary: str, fields: dict, files: dict) -> bytes:
@@ -2743,6 +2920,9 @@ _SCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}
  #panel ul {{ list-style:none; margin:0; padding:0; }}
  #panel li {{ margin:3px 0; }}
  .sw {{ display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:6px; }}
+ #panel button {{ margin-top:8px; width:100%; padding:5px 8px; border:1px solid #cbd5e0;
+   border-radius:4px; background:#f7fafc; color:#1a365d; font-size:11px; cursor:pointer; }}
+ #panel button:hover {{ background:#edf2f7; }}
  #hint {{ position:absolute; left:14px; bottom:34px; z-index:9; background:rgba(26,54,93,.9); color:#fff;
    padding:8px 12px; border-radius:4px; font-size:11px; }}
  #msg {{ position:absolute; left:14px; top:14px; z-index:9; background:rgba(0,0,0,.65); color:#fff;
@@ -2751,6 +2931,7 @@ _SCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}
 </style></head><body>
 <div id="view"></div>
 <div id="panel"><h4>BIM FINDINGS · 3D</h4><ul>{legend}</ul>
+<button id="recentre" type="button" onclick="window.__recentre()">重設視角 · Re-centre</button>
 <div style="margin-top:8px;color:#c53030;font-size:11px">柱高 12 m，僅作定位提示，非實際構件</div>
 <div style="margin-top:6px;color:#4a5568">Powered by Esri</div></div>
 <div id="hint">拖曳旋轉 · 滾輪縮放 · 右鍵平移</div>
@@ -2764,31 +2945,50 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
   const COLOURS = {{ duplicate_mark: "#c53030", no_dimension: "#b7791f", slab_coverage: "#2b6cb0" }};
   const gLayer = new GraphicsLayer({{ title: "Findings" }});
   const map = new Map({{ basemap: "satellite", ground: "world-elevation", layers: [gLayer] }});
-  const CAM = {{ longitude: {cam_lon}, latitude: {cam_lat}, heading: 25, tilt: 68, above: {cam_above} }};
-  // ponytail: camera z is metres above mean sea level, not above ground. Querying the
-  // ground height and adding a fixed offset is the only framing that survives a 388 m site.
-  let framed = false;
-  function frame() {{
-    // must never reject: a throw here would be caught by the layer's .catch and reported
-    // as "BIM failed to load" even though the model is fine
-    if (framed) return;
+  const CAM = {{ longitude: {cam_lon}, latitude: {cam_lat}, heading: 25, tilt: 62, above: {cam_above} }};
+  // ponytail: goTo the layer's own extent, never a hand-computed camera. A camera set
+  // before the layer resolves leaves the user looking at the region from orbit — the
+  // model is then a speck and reads as "no model" (observed 2026-10-29).
+  window.__frames = 0;
+  // goTo(extent) does not reliably centre a tilted 3D camera — the eye can settle several
+  // hundred metres off-target and the building then reads as "missing" (2026-10-29).
+  // Target the extent CENTRE as a point instead, with the zoom derived from its span.
+  window.__fit = function (layer) {{
     try {{
-      framed = true;
-      const put = (z) => {{
-        view.camera = {{ position: {{ longitude: CAM.longitude, latitude: CAM.latitude,
-                                     z: Math.round(z + CAM.above) }},
-                        tilt: CAM.tilt, heading: CAM.heading }};
-        window.__cam = {{ z: view.camera.position.z, tilt: view.camera.tilt }};
-      }};
-      const gv = view.groundView;
-      if (gv && gv.queryElevation) {{
-        gv.queryElevation({{ type: "point", longitude: CAM.longitude, latitude: CAM.latitude }})
-          .then(g => put(g.z)).catch(() => put(420));
-      }} else {{ put(420); }}
-    }} catch (e) {{ window.__frameError = String(e); }}
-  }}
+      const e = layer && layer.fullExtent;
+      if (!e) return false;
+      if (e.spatialReference && e.spatialReference.wkid !== 4326) {{
+        view.goTo({{ target: e, tilt: 62 }}, {{ duration: 400 }}).catch(function () {{}});
+        window.__frames++;
+        return true;
+      }}
+      const cx = (e.xmin + e.xmax) / 2, cy = (e.ymin + e.ymax) / 2;
+      const coslat = Math.cos(cy * Math.PI / 180);
+      const spanM = Math.max((e.xmax - e.xmin) * 111320 * coslat, (e.ymax - e.ymin) * 111320);
+      const zoom = Math.max(14, Math.min(20, Math.log2(156543.03 * coslat / (spanM / 840))));
+      // center+zoom, animate:false — a point `target` with zoom silently no-ops and an
+      // animated goTo can be interrupted before it lands (both observed 2026-10-29)
+      view.goTo({{ center: [cx, cy], tilt: 62, heading: 25, zoom: zoom }}, {{ animate: false }})
+        .then(function () {{
+          window.__cam = {{ z: Math.round(view.camera.position.z),
+                          tilt: Math.round(view.camera.tilt) }};
+        }}).catch(function () {{}});
+      window.__frames++;
+      return true;
+    }} catch (err) {{ window.__frameError = String(err); return false; }}
+  }};
+  window.__recentre = function () {{
+    if (window.__fit(window.__bimLayer)) return true;
+    try {{
+      view.camera = {{ position: {{ longitude: CAM.longitude, latitude: CAM.latitude, z: CAM.above }},
+                      tilt: CAM.tilt, heading: CAM.heading }};
+      return true;
+    }} catch (err) {{ window.__frameError = String(err); return false; }}
+  }};
+  function frame() {{ return window.__recentre(); }}
   const view = new SceneView({{ container: "view", map: map,
     camera: {{ position: {{ latitude: {cam_lat}, longitude: {cam_lon}, z: 600 }}, tilt: 62 }} }});
+  window.__view = view;      // debugging handle: view.takeScreenshot() and camera state
 
   // BIM first, so it draws under the markers. Empty service = slpk source, markers only.
   const SVC = "{service}";
@@ -2796,15 +2996,27 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
   {token_js}
   const bim = new BuildingSceneLayer({{ url: SVC, title: "BIM model" }});
   map.add(bim, 0);
+  window.__bimLayer = bim;
   bim.load().then(() => {{
+    // A Building scene service usually stores its root "Full Model" group INVISIBLE, and
+    // the JS API honours that — the layer loads, reports sublayers, and draws nothing.
+    // An audit viewer wants the whole building, so show the whole sublayer tree.
+    (function show(list) {{
+      (list || []).forEach(function (s) {{
+        try {{ s.visible = true; }} catch (e) {{}}
+        if (s.sublayers) show(s.sublayers);
+      }});
+    }})(bim.sublayers);
     window.__layerKind = "BuildingSceneLayer";
     msg.textContent = "BIM: " + (bim.sublayers ? bim.sublayers.length : 0) + " sublayers";
-    frame();   // no-op if already framed; the view.when() path is the reliable one
+    frame();
+    setTimeout(frame, 2000);   // extent can settle a beat after load; re-frame once
   }}).catch(() => {{
     map.remove(bim);
     const alt = new SceneLayer({{ url: SVC, title: "BIM model" }});
     map.add(alt, 0);
-    alt.load().then(() => {{ window.__layerKind = "SceneLayer"; msg.textContent = "BIM: scene layer"; frame(); }})
+    alt.load().then(() => {{ window.__layerKind = "SceneLayer"; window.__bimLayer = alt;
+      msg.textContent = "BIM: scene layer"; frame(); setTimeout(frame, 2000); }})
       .catch(() => {{ window.__layerKind = "failed"; msg.textContent = "BIM 載入失敗"; }});
   }});
   }} else {{ window.__layerKind = "none-slpk"; msg.textContent = "BIM: package source（無 hosted layer）"; }}
@@ -2910,7 +3122,7 @@ def main():
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
     bim_tools = (bim_audit, bim_floors, bim_elements, site_zoning, lot_check,
-                 bim_findings, bim_report, publish_findings, publish_scene)
+                 bim_findings, bim_report, publish_findings, publish_scene, webscene_viewer)
     tools = [search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
              geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
              arcgis_request, publish_layer, dataset_status, spatial_join]

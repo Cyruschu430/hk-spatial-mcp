@@ -518,6 +518,16 @@ private-viewer auth) and the enhancement roadmap.
 require `ARCGIS_TOKEN` set to a user or OAuth token. An ArcGIS API key is sufficient for basemaps
 and geocoding but cannot read or create organisation content.
 
+### `webscene_viewer(item_id: str)`
+
+Draws an ArcGIS **Web Scene** in a local 3D viewer and returns the localhost url. Every
+operational layer the viewer understands — 3D object scene services and integrated meshes —
+becomes a toggleable layer in the panel, and the scene's own initial camera is reused, so the
+building is framed on load. Point clouds, Gaussian splats and the scene's basemap are skipped
+(the satellite basemap stands in). Private scene documents need `ARCGIS_TOKEN`; layers that are
+world-readable need no token at all, which makes this a quick way to look at a shared BIM
+web scene without ArcGIS Pro or a sign-in.
+
 ---
 
 ## Configuration

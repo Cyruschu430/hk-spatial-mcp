@@ -163,6 +163,25 @@ python3 hk_spatial_mcp.py          # stdio MCP server
 
 ---
 
+## Agent skill — ship the instructions with the tools
+
+`SKILL.md` (repo root, frontmatter `name: hk-spatial`) is the agent-facing half of this server. The tools
+say what they do; the skill says what the agent must **not** do — write its own fetch code, paste feature
+records into the chat, invent a GFA, or claim compliance. Load it wherever your client keeps skills:
+
+| Client | Where it goes |
+|---|---|
+| Claude Code / Claude Desktop | `~/.claude/skills/hk-spatial/SKILL.md` |
+| DeepSeek Harness | add this repo as a skill-hub market source, or drop it in `~/.dsh/skills/hk-spatial/` |
+| WorkBuddy / CodeBuddy | `~/.workbuddy/skills/hk-spatial/SKILL.md` (or paste it as the system prompt) |
+| Anything else | paste `SKILL.md` into the system prompt — it is plain Markdown, no tooling required |
+
+It is versioned with the server on purpose: the skill documents behaviour that changes when the reader
+changes (the i3s 1.4–1.6 fallback, the nested-discipline merge, `completeness_pct` being *% empty*). Re-pull
+it after an upgrade, or the agent will quote yesterday's rules against today's tools.
+
+---
+
 ## Prompt cookbook
 
 Ready-to-use instructions for an AI client. The English and Chinese versions are equivalent — use

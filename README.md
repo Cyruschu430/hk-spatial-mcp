@@ -507,6 +507,12 @@ bytes are downloaded once into the local cache, re-uploaded, and published. The 
 finally draws the model itself for package sources. 3D Object and Building Scene Layer packages
 both publish. The scene service is created **private**; this tool never shares anything, so a
 copied package stays visible to your account only until you share or delete it yourself.
+`bim_findings(mode="scene")` on that private service embeds a session token in the local
+viewer page (IdentityManager, `www.arcgis.com` server key) so the model draws without
+sharing — localhost use only, the token expires with your session. See
+[`docs/scene-publishing-notes.md`](docs/scene-publishing-notes.md) for every AGOL quirk
+found on the way (outputType, job-status polling, name rules, 409 duplicate delivery,
+private-viewer auth) and the enhancement roadmap.
 
 **Authentication.** `arcgis_request`, `publish_layer`, `publish_findings` and `publish_scene`
 require `ARCGIS_TOKEN` set to a user or OAuth token. An ArcGIS API key is sufficient for basemaps

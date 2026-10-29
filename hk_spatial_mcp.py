@@ -2624,6 +2624,26 @@ def _findings_geojson(source, refresh=False):
     return {"type": "FeatureCollection", "features": feats}, d["service"], d.get("layerType") or "3DObject"
 
 
+def _viewer_service_auth(service: str):
+    """(token for the viewer | None, note | None) — a private scene service cannot be drawn
+    by a browser without credentials: the layer's load() stalls instead of failing and the
+    JS IdentityManager pops a sign-in dialog (observed 2026-10-29). A ?token= on the layer
+    URL is not forwarded to i3s child requests, so the page registers the token with
+    IdentityManager instead. Probe anonymously; on error hand the LOCAL viewer a session
+    token — it expires with the session and the page is only ever served from localhost."""
+    tok = _token()
+    if not service.startswith("http") or not tok:
+        return None, None
+    try:
+        d = json.loads(_http(f"{service}?f=json", timeout=60).decode())
+    except Exception:
+        return None, None
+    if d.get("layers"):
+        return None, None  # public — no credentials needed
+    return tok, ("private scene service — the local viewer embeds a session token "
+                 "(localhost use only; the token expires with your session)")
+
+
 def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
     """Write the audit findings as GeoJSON plus a viewer page, ready to publish.
 
@@ -2642,6 +2662,7 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
                ("slab_coverage", "#2b6cb0"))
     legend = "".join(f'<li><span class="sw {k}"></span>{k} · {v}</li>' for k, v in counts.items())
     css = "".join(f".sw.{k}{{background:{c}}}" for k, c in colours)
+    viewer_note = None
     if mode == "scene":
         lons = [f["geometry"]["coordinates"][0] for f in gj["features"]]
         lats = [f["geometry"]["coordinates"][1] for f in gj["features"]]
@@ -2657,10 +2678,18 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
             xmin, xmax, ymin, ymax = cx - 0.002, cx + 0.002, cy - 0.002, cy + 0.002
         span_m = max((ymax - ymin) * 111320,
                      (xmax - xmin) * 111320 * math.cos(math.radians(cy)), 30)
+        tok_viewer, viewer_note = _viewer_service_auth(
+            "" if service.startswith("slpk://") else service)
+        token_js = ""
+        if tok_viewer:
+            # AGOL normalizes every *.arcgis.com host to www.arcgis.com inside IdentityManager —
+            # registering the service's own host never matches and the token never attaches (499)
+            token_js = f'idMgr.registerToken({{ server: "https://www.arcgis.com", token: "{tok_viewer}" }});'
         page.write_text(_SCENE_PAGE.format(
             title="BIM Findings — 3D", data_url=f"{slug}.geojson",
             # a Scene Package has no hosted layer for the viewer to load — markers only
             service="" if service.startswith("slpk://") else service,
+            token_js=token_js,
             legend=legend, css=css,
             cam_lon=round(cx, 6), cam_lat=round(cy, 6),
             cam_above=int(min(240, max(60, span_m * 2.5))),
@@ -2681,6 +2710,7 @@ def bim_findings(source: str, mode: str = "map", refresh: bool = False) -> str:
         "geojson_file": str(fp),
         "viewer_url": f"http://localhost:{PORT}/{page.name}",
         "viewer_file": str(page),
+        **({"viewer_note": viewer_note} if viewer_note else {}),
         "note": BIM_NOTE,
     }, ensure_ascii=False)
 
@@ -2728,8 +2758,8 @@ _SCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}
 <script src="https://js.arcgis.com/4.31/"></script>
 <script>
 require(["esri/Map","esri/views/SceneView","esri/layers/BuildingSceneLayer","esri/layers/SceneLayer",
-         "esri/layers/GraphicsLayer","esri/Graphic","esri/PopupTemplate"],
-function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic, PopupTemplate) {{
+         "esri/layers/GraphicsLayer","esri/Graphic","esri/PopupTemplate","esri/identity/IdentityManager"],
+function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic, PopupTemplate, idMgr) {{
   const msg = document.getElementById("msg");
   const COLOURS = {{ duplicate_mark: "#c53030", no_dimension: "#b7791f", slab_coverage: "#2b6cb0" }};
   const gLayer = new GraphicsLayer({{ title: "Findings" }});
@@ -2763,6 +2793,7 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
   // BIM first, so it draws under the markers. Empty service = slpk source, markers only.
   const SVC = "{service}";
   if (SVC) {{
+  {token_js}
   const bim = new BuildingSceneLayer({{ url: SVC, title: "BIM model" }});
   map.add(bim, 0);
   bim.load().then(() => {{

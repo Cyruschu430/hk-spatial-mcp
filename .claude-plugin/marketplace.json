@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "hk-spatial-mcp",
-      "description": "23 tools over 1,150+ CSDI / data.gov.hk datasets — search, load, query, summarise, geocode, elevation, buffer, build_map, build_scene, spatial_join, dataset_status, plus BIM/IFC audit (IDS-style checks, zoning, lot). No API key.",
+      "description": "25 tools over 1,150+ CSDI / data.gov.hk datasets — search, load, query, summarise, geocode, elevation, buffer, build_map, build_scene, spatial_join, dataset_status, plus BIM/IFC audit (IDS-style checks, zoning, lot). No API key.",
       "source": "./",
       "category": "gis",
       "keywords": [

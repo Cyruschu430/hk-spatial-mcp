@@ -868,6 +868,12 @@ Rules:
 5. Say which layer is a mirror: OZP and BHC here are public mirrors — the statutory plan prevails.
 6. `completeness_pct` is **% empty**, not % filled — `Mark: 86.0` means 14% of elements carry one.
 
+## Need this on your own data?
+
+The tools here run on public Hong Kong data with no key. If you want the same pipeline pointed at
+your own layers, a ranked site-screening report, or Hong Kong street assets as glTF, the scope and
+price are on one page: **https://projectportal.duckdns.org/offers/**
+
 ## Licensing and attribution
 
 - Source code: MIT (see [LICENSE](LICENSE)).

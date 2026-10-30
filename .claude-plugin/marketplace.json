@@ -1,0 +1,25 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "hk-spatial",
+  "description": "Hong Kong spatial analysis tools for AI agents. 100% keyless public data.",
+  "owner": {
+    "name": "Cyrus Chu",
+    "url": "https://github.com/Cyruschu430"
+  },
+  "plugins": [
+    {
+      "name": "hk-spatial-mcp",
+      "description": "23 tools over 1,150+ CSDI / data.gov.hk datasets — search, load, query, summarise, geocode, elevation, buffer, build_map, build_scene, spatial_join, dataset_status, plus BIM/IFC audit (IDS-style checks, zoning, lot). No API key.",
+      "source": "./",
+      "category": "gis",
+      "keywords": [
+        "gis",
+        "hong-kong",
+        "spatial",
+        "csdi",
+        "arcgis",
+        "geospatial"
+      ]
+    }
+  ]
+}

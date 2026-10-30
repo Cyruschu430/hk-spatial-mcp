@@ -45,6 +45,33 @@ CSW_BODY = """<?xml version="1.0"?><csw:GetRecords service="CSW" version="2.0.2"
 CSW_ALL = """<?xml version="1.0"?><csw:GetRecords service="CSW" version="2.0.2" maxRecords="{n}" startPosition="1" resultType="results" outputSchema="http://www.opengis.net/cat/csw/2.0.2" xmlns:csw="http://www.opengis.net/cat/csw/2.0.2"><csw:Query typeNames="csw:Record"><csw:ElementSetName>full</csw:ElementSetName></csw:Query></csw:GetRecords>"""
 
 
+# Only Esri hosts ever receive the token. Without this, any tool argument (or an agent
+# talked into it by a hostile page) could POST ARCGIS_TOKEN to an arbitrary server.
+_TOKEN_HOSTS = ("arcgis.com", "esri.com")
+
+
+def _token_host_ok(url) -> bool:
+    """True when url's host is an Esri domain (or a subdomain of one)."""
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == h or host.endswith("." + h) for h in _TOKEN_HOSTS)
+
+
+class _NoLeakRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow a redirect that would carry a token to a non-Esri host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if "token=" in (req.full_url or "") and not _token_host_ok(newurl):
+            raise urllib.error.HTTPError(newurl, code, "redirect to non-Esri host blocked",
+                                         headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_NoLeakRedirect)
+
+
 def _http(url, data=None, headers=None, timeout=60):
     # ponytail: one retry on 5xx. The public Esri services return a transient 500 now and then
     # (observed on MapServer/export); a second attempt is cheaper than teaching every caller to retry.
@@ -52,7 +79,7 @@ def _http(url, data=None, headers=None, timeout=60):
     for attempt in (1, 2):
         req = urllib.request.Request(url, data=data, headers=headers or {})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _OPENER.open(req, timeout=timeout) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             last = e
@@ -433,7 +460,9 @@ def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page:
                         json.dumps(f"{TILES}/{svc}/MapServer" if svc else ""))
     html = html.replace("/*%LABELS_URL%*/",
                         json.dumps(f"{TILES}/{LABELS_LAYER}/MapServer" if labels else ""))
-    html = html.replace("/*%TITLE%*/", json.dumps(title, ensure_ascii=False))
+    # json.dumps does not escape "</" — a title holding </script> would close the block.
+    html = html.replace("/*%TITLE%*/",
+                        json.dumps(title, ensure_ascii=False).replace("</", "<\\/"))
     html = html.replace("/*%LAYERS%*/", json.dumps(layers, ensure_ascii=False))
     WORK.mkdir(parents=True, exist_ok=True)
     # A build must never destroy an earlier map: keep a stable per-build page, and refresh the
@@ -1086,6 +1115,10 @@ def arcgis_request(path: str, params: dict | None = None, method: str = "GET") -
     # a full http(s) url is used verbatim — feature-service queries and GP tasks live
     # outside the sharing/rest root (servicesN.arcgis.com)
     url = path if path.startswith("http") else f"{AGOL}/{path.lstrip('/')}"
+    if not _token_host_ok(url):
+        return json.dumps({"error": "arcgis_request: only Esri hosts (*.arcgis.com, *.esri.com) "
+                                    "may be called — the token must not leave Esri",
+                           "tool": "arcgis_request", "url": url}, ensure_ascii=False)
     if method.upper() == "GET":
         raw = _http(url + "?" + urllib.parse.urlencode(p), timeout=120)
     else:
@@ -1651,6 +1684,8 @@ def _i3s_get(url, timeout=60):
 
 def _with_token(url):
     if url.startswith("slpk://"):
+        return url
+    if not _token_host_ok(url):  # never attach the token to a non-Esri host
         return url
     tok = os.environ.get("ARCGIS_TOKEN") or ""
     if not tok:
@@ -2610,9 +2645,13 @@ def _print_pdf(html_path, pdf_path, timeout=120):
         if not exe or not pathlib.Path(exe).exists():
             continue
         try:
-            subprocess.run([exe, "--headless", "--no-sandbox", "--disable-gpu",
-                            "--no-pdf-header-footer", f"--print-to-pdf={pdf_path}",
-                            f"file://{html_path}"], check=True, timeout=timeout,
+            # ponytail: --no-sandbox only as root (Chromium refuses its own sandbox at uid 0).
+            # This renders HTML built from third-party feeds, so keep the sandbox everywhere else.
+            args = [exe, "--headless", "--disable-gpu", "--no-pdf-header-footer",
+                    f"--print-to-pdf={pdf_path}", f"file://{html_path}"]
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                args.insert(2, "--no-sandbox")
+            subprocess.run(args, check=True, timeout=timeout,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if pdf_path.exists() and pdf_path.stat().st_size > 1000:
                 return pdf_path

@@ -1,6 +1,6 @@
 {
   "name": "hk-spatial-mcp",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Hong Kong spatial analysis for AI agents — 23 tools over 1,150+ CSDI datasets (search/geocode/elevation/buffer/maps) plus BIM audit. 100% keyless.",
   "author": {
     "name": "Cyrus Chu",

@@ -3,3 +3,8 @@ __pycache__/
 hk-spatial/
 *.zip
 .venv/
+
+# a token file must never be committable
+.env
+.env.*
+!.env.example

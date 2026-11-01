@@ -880,8 +880,10 @@ Two tools take the server from vector GIS into remote sensing without adding a d
 
 Scene discovery over a bbox and date range from the Microsoft Planetary Computer STAC API. Returns
 scene ids, datetimes, cloud cover, asset names and a `preview` PNG URL for each scene (Planetary
-Computer renders it server-side, so the agent can show an image without decoding a 3 GB COG).
-Keyless, metadata only — the discovery step.
+Computer renders it server-side at 512 px, so the agent can show an image without decoding a 3 GB
+COG). The preview covers the **whole granule** (~110 km) — useful as a cloud check, not as a bbox
+close-up; the preview service accepts `bbox` and ignores it, so the field says so. Keyless, metadata
+only — the discovery step.
 
 ### `eo_stats(bbox, start, end, index="NDVI", max_cloud=30)`
 

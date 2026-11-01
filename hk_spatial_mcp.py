@@ -3198,6 +3198,14 @@ def _bbox4(bbox) -> list | None:
     return v if len(v) == 4 and v[0] < v[2] and v[1] < v[3] else None
 
 
+def _preview_url(asset, px: int = 512) -> str | None:
+    """MPC preview PNG, resized. The image covers the whole granule; bbox is ignored server-side."""
+    href = (asset or {}).get("href")
+    if not href:
+        return None
+    return href + (("&" if "?" in href else "?") + f"width={px}&height={px}")
+
+
 def eo_search(collection: str = "sentinel-2-l2a", bbox=None, start: str = "", end: str = "",
               max_cloud: float = 30, limit: int = 10) -> str:
     """Find satellite scenes over an area and date range, from Microsoft Planetary Computer — no key.
@@ -3229,14 +3237,16 @@ def eo_search(collection: str = "sentinel-2-l2a", bbox=None, start: str = "", en
     scenes = [{"id": f.get("id"), "datetime": (f.get("properties") or {}).get("datetime"),
                "cloud_cover": (f.get("properties") or {}).get("eo:cloud_cover"),
                "assets": sorted((f.get("assets") or {}).keys())[:12],
-               # MPC already renders each item to a PNG; link it instead of decoding a 3 GB COG
-               "preview": ((f.get("assets") or {}).get("rendered_preview") or {}).get("href")}
+               # MPC already renders each item to a PNG; link it instead of decoding a 3 GB COG.
+               # width/height only resizes: the preview is the WHOLE granule (~110 km), not the bbox.
+               "preview": _preview_url((f.get("assets") or {}).get("rendered_preview") or {})}
               for f in feats]
     best = min(scenes, key=lambda s: (s["cloud_cover"] is None, s["cloud_cover"] or 1e9)) if scenes else None
     return json.dumps({"collection": collection, "bbox": b, "matched": len(scenes),
                        "best_scene": best, "scenes": scenes,
                        "source": "Microsoft Planetary Computer STAC (keyless)",
-                       "note": "metadata only — call eo_stats for a value over the bbox"}, ensure_ascii=False)
+                       "note": "metadata only — call eo_stats for a value over the bbox. "
+                               "preview is the full granule (~110 km), not the bbox"}, ensure_ascii=False)
 
 
 def _cdse_token() -> tuple[str | None, str | None]:

@@ -1,0 +1,23 @@
+{
+ "id": "q09_static_map",
+ "question": "Render a street basemap PNG of Kwun Tong for a report.",
+ "min_calls": 1,
+ "expected_calls": [
+  {
+   "tool": "export_static_map",
+   "args": {
+    "bbox": "114.20,22.30,114.24,22.33",
+    "zoom": 14,
+    "basemap": "streets"
+   }
+  }
+ ],
+ "freeze": [
+  "bbox",
+  "basemap"
+ ],
+ "expected_value": {
+  "bbox": "114.20,22.30,114.24,22.33",
+  "basemap": "streets"
+ }
+}

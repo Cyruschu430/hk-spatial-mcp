@@ -1,0 +1,35 @@
+{
+ "id": "q01_toilets_by_park",
+ "question": "How many public toilets are in each country park, and which park has the most?",
+ "min_calls": 2,
+ "expected_calls": [
+  {
+   "tool": "load_hk_data",
+   "args": {
+    "dataset_id": "afcd_rcd_1635136427551_29173"
+   }
+  },
+  {
+   "tool": "summarise_hk_data",
+   "args": {
+    "dataset_id": "afcd_rcd_1635136427551_29173",
+    "group_by": "COUNTRY_PARK_EN",
+    "agg": "count"
+   }
+  }
+ ],
+ "irrelevant_tools": [
+  "search_hk_data",
+  "dataset_status"
+ ],
+ "freeze": [
+  "groups",
+  "rows.0.group",
+  "rows.0.count"
+ ],
+ "expected_value": {
+  "groups": 26,
+  "rows.0.group": "TAI LAM COUNTRY PARK",
+  "rows.0.count": 22
+ }
+}

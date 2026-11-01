@@ -1,0 +1,30 @@
+{
+ "id": "q05_eo_scene_search",
+ "question": "Find low-cloud Sentinel-2 scenes over Kwun Tong for summer 2026 and name the clearest one.",
+ "min_calls": 1,
+ "expected_calls": [
+  {
+   "tool": "eo_search",
+   "args": {
+    "collection": "sentinel-2-l2a",
+    "bbox": "114.20,22.30,114.24,22.33",
+    "start": "2026-06-01",
+    "end": "2026-08-31",
+    "max_cloud": 30
+   }
+  }
+ ],
+ "args_tolerance": {
+  "max_cloud": 1
+ },
+ "freeze": [
+  "collection",
+  "matched",
+  "best_scene.cloud_cover"
+ ],
+ "expected_value": {
+  "collection": "sentinel-2-l2a",
+  "matched": 8,
+  "best_scene.cloud_cover": 2.531007
+ }
+}

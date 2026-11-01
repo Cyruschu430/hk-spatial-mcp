@@ -1,0 +1,27 @@
+{
+ "id": "q06_eo_ndvi",
+ "question": "What is the mean NDVI over Kwun Tong for June-July 2026, from Sentinel-2?",
+ "min_calls": 1,
+ "expected_calls": [
+  {
+   "tool": "eo_stats",
+   "args": {
+    "bbox": "114.20,22.30,114.24,22.33",
+    "start": "2026-06-01",
+    "end": "2026-07-31",
+    "index": "NDVI"
+   }
+  }
+ ],
+ "freeze": [
+  "index",
+  "mean_of_months"
+ ],
+ "value_tolerance": {
+  "mean_of_months": 0.02
+ },
+ "expected_value": {
+  "index": "NDVI",
+  "mean_of_months": 0.104
+ }
+}

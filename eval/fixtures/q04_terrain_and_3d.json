@@ -1,0 +1,40 @@
+{
+ "id": "q04_terrain_and_3d",
+ "question": "What is the ground elevation at 114.1716E 22.2759N, and render the country parks in 3D?",
+ "min_calls": 2,
+ "expected_calls": [
+  {
+   "tool": "elevation_at",
+   "args": {
+    "lon": 114.1716,
+    "lat": 22.2759
+   }
+  },
+  {
+   "tool": "build_scene",
+   "args": {
+    "dataset_ids": [
+     "afcd_rcd_1635129924112_81508"
+    ],
+    "tilt": 60
+   }
+  }
+ ],
+ "args_tolerance": {
+  "lon": 0.0005,
+  "lat": 0.0005
+ },
+ "args_subset": [
+  "dataset_ids"
+ ],
+ "freeze": [
+  "elevation_m"
+ ],
+ "value_tolerance": {
+  "elevation_m": 1.0
+ },
+ "expected_value": {
+  "elevation_m": 57.5274
+ },
+ "answer_from": 0
+}

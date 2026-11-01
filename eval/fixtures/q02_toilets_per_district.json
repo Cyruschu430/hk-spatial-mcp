@@ -1,0 +1,40 @@
+{
+ "id": "q02_toilets_per_district",
+ "question": "Join the country-park toilets onto the 18 District Boundaries: how many toilets fall in each district?",
+ "min_calls": 3,
+ "expected_calls": [
+  {
+   "tool": "load_hk_data",
+   "args": {
+    "dataset_id": "afcd_rcd_1635136427551_29173"
+   }
+  },
+  {
+   "tool": "load_hk_data",
+   "args": {
+    "dataset_id": "had_rcd_1634523272907_75218"
+   }
+  },
+  {
+   "tool": "spatial_join",
+   "args": {
+    "points_dataset": "afcd_rcd_1635136427551_29173",
+    "polygons_dataset": "had_rcd_1634523272907_75218",
+    "field": "NAME_EN"
+   }
+  }
+ ],
+ "irrelevant_tools": [
+  "search_hk_data"
+ ],
+ "freeze": [
+  "polygons",
+  "points",
+  "rows.0.count"
+ ],
+ "expected_value": {
+  "polygons": 18,
+  "points": 167,
+  "rows.0.count": 31
+ }
+}

@@ -8,3 +8,4 @@ hk-spatial/
 .env
 .env.*
 !.env.example
+eval-report*.json

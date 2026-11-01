@@ -1,0 +1,23 @@
+{
+ "id": "q08_dataset_freshness",
+ "question": "Is the country-park toilets dataset still being served, and how old is it?",
+ "min_calls": 1,
+ "expected_calls": [
+  {
+   "tool": "dataset_status",
+   "args": {
+    "dataset_id": "afcd_rcd_1635136427551_29173"
+   }
+  }
+ ],
+ "freeze": [
+  "checked",
+  "stale",
+  "datasets.0.state"
+ ],
+ "expected_value": {
+  "checked": 1,
+  "stale": 0,
+  "datasets.0.state": "fresh"
+ }
+}

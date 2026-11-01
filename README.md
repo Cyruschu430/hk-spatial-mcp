@@ -88,6 +88,7 @@ m.build_scene([res], 'Hong Kong Impounding Reservoirs', 'imagery', tilt=65)"
 | **Spatial join** | `spatial_join` counts points inside polygons from two loaded datasets — "which district has the most of these" — with a pure-Python point-in-polygon test, no geometry service. |
 | **Answers, not just maps** | `summarise_hk_data` answers a question in text — counts, sums or averages grouped by any field — and renders a bar chart page. `query_hk_data` returns a few individual rows so a single value can be checked. |
 | **Printable static map** | `export_static_svg` writes a vector map **with the data drawn** — basemap tiles plus the features as real shapes — ready to print to PDF from a browser. |
+| **Earth observation** | `eo_search` finds Sentinel-2 / Landsat / DEM scenes from the Microsoft Planetary Computer STAC catalogue — keyless. `eo_stats` returns monthly NDVI / NDBI / NDMI over a bbox as **statistics**, never a raster, so it is safe on a small machine. |
 | **Geocoding and geometry** | Address ↔ coordinate (both directions), project / buffer / simplify on any GeoJSON geometry, ground elevation, via Esri's public services. No key required. |
 | **Basemaps** | 11 keyless Esri basemap styles (imagery, topographic, streets, light/dark gray, terrain, hillshade, ocean, physical, natgeo, shaded relief) plus an optional labels overlay. |
 | **Static map export** | Render a basemap PNG (no key) into the workspace for reports and decks. |
@@ -870,6 +871,64 @@ Rules:
 4. `Mark` filled at 0 means unset, not a tag. Over 90% empty ⇒ the model cannot drive asset tracking.
 5. Say which layer is a mirror: OZP and BHC here are public mirrors — the statutory plan prevails.
 6. `completeness_pct` is **% empty**, not % filled — `Mark: 86.0` means 14% of elements carry one.
+
+## Earth observation tools
+
+Two tools take the server from vector GIS into remote sensing without adding a dependency or a key.
+
+### `eo_search(collection="sentinel-2-l2a", bbox=None, start="", end="", max_cloud=30, limit=10)`
+
+Scene discovery over a bbox and date range from the Microsoft Planetary Computer STAC API. Returns
+scene ids, datetimes, cloud cover and asset names. Keyless, metadata only — the discovery step.
+
+### `eo_stats(bbox, start, end, index="NDVI", max_cloud=30)`
+
+Monthly mean **NDVI / NDBI / NDMI** over a bbox from Copernicus Sentinel-2 L2A, returned as
+statistics (a few kB), not imagery. Needs free Copernicus OAuth credentials — `CDSE_CLIENT_ID` +
+`CDSE_CLIENT_SECRET`, or `CLIENT_ID=` / `CLIENT_SECRET=` in `~/.config/cdse/credentials`. Without
+them the tool returns an error that says exactly what to do; the rest of the server is unaffected.
+
+Why statistics and not tiles: a Sentinel-2 tile is ~3 GB decoded, an index over a district bbox is
+a few kB of JSON. Copernicus data is free for commercial use with attribution, which Google Earth
+Engine's community tier is not.
+
+## Trajectory evaluation (`eval/`)
+
+Answer accuracy is not enough: a right answer reached by the wrong tool path will not survive the
+next dataset. `eval/` scores the **path**, deterministically, from a recorded trace.
+
+```bash
+python -m eval.run                 # score the frozen traces, print the table, exit 1 on failure
+python -m eval.record --freeze     # re-record traces against the live server (network + keys)
+python eval/trajectory.py          # evaluator self-check, stdlib only
+python -m eval.negative_proof      # proof that a fabricated answer fails
+```
+
+Six metrics per fixture: tools-any-order, tools-in-order, tools-exact, parameters (with numeric
+tolerance and a forbidden-tool guard), outcome, and efficiency (reported, never failed on). CI runs
+the evaluator on the committed traces, so the eval job needs **no network, no keys, no server**.
+
+### Add a fixture
+
+1. `eval/fixtures/qNN_name.json` with `question`, `expected_calls` (`tool` + `args`), `min_calls`,
+   and the `freeze` paths you want as ground truth.
+2. `python -m eval.record --freeze --only qNN` — records `eval/traces/qNN_name.jsonl` and writes the
+   observed answer into the fixture.
+3. Review the fixture diff, then commit both files.
+
+### Honest limits
+
+- Ten fixtures is a smoke suite, not a benchmark. It catches path regressions and fabrication; it
+  does not measure general capability.
+- Traces are recorded from **scripted** reference runs, not from a model under test. Scoring a live
+  agent means feeding its trace into `trajectory.score` with the same fixtures — the evaluator is
+  agnostic, but no live-agent recording pipeline ships here.
+- Ground truth is frozen at record time. Datasets that change (scene counts, freshness dates) will
+  drift from the fixture; re-record deliberately, not automatically.
+- Metrics 1-4 gate CI by default (the path). Outcome accuracy is reported; the negative fixture
+  opts into failing on it, so inventing a number still fails.
+- `site_zoning(radius_m=...)` clips a **square bbox**, not a circle — the fixture asserts the
+  returned bbox rather than pretending it is a radius.
 
 ## Need this on your own data?
 

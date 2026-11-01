@@ -3184,6 +3184,156 @@ require(["esri/Map","esri/views/MapView","esri/layers/GeoJSONLayer"], function(M
 </script></body></html>"""
 
 
+# ---------------------------------------------------------------- Earth observation
+
+STAC = "https://planetarycomputer.microsoft.com/api/stac/v1"
+
+
+def _bbox4(bbox) -> list | None:
+    """'minx,miny,maxx,maxy' | [..] | None -> 4 floats, or None if unparseable."""
+    try:
+        v = [float(x) for x in (bbox.split(",") if isinstance(bbox, str) else bbox)]
+    except Exception:
+        return None
+    return v if len(v) == 4 and v[0] < v[2] and v[1] < v[3] else None
+
+
+def eo_search(collection: str = "sentinel-2-l2a", bbox=None, start: str = "", end: str = "",
+              max_cloud: float = 30, limit: int = 10) -> str:
+    """Find satellite scenes over an area and date range, from Microsoft Planetary Computer — no key.
+
+    Metadata only (scene id, date, cloud cover, asset names): this is the discovery step. Use
+    `eo_stats` when you need an actual index value over the bbox. Collections worth knowing:
+    sentinel-2-l2a, landsat-c2-l2, naip, cop-dem-glo-30, sentinel-1-rtc, io-lulc-annual-v02.
+    """
+    b = _bbox4(bbox) if bbox is not None else None
+    if bbox is not None and b is None:
+        return json.dumps({"error": "bbox must be 'minx,miny,maxx,maxy' with minx<maxx, miny<maxy"})
+    params = {"collections": collection, "limit": max(1, min(int(limit), 50))}
+    if b:
+        params["bbox"] = ",".join(f"{v:.6f}" for v in b)
+    if start and end:
+        params["datetime"] = f"{start}T00:00:00Z/{end}T23:59:59Z"
+    elif start:
+        params["datetime"] = f"{start}T00:00:00Z/.."
+    elif end:
+        params["datetime"] = f"../{end}T23:59:59Z"
+    if collection.startswith("sentinel-2") or collection.startswith("landsat"):
+        params["query"] = json.dumps({"eo:cloud_cover": {"lt": max_cloud}})
+    url = f"{STAC}/search?" + urllib.parse.urlencode(params)
+    try:
+        raw = json.loads(_http(url, timeout=90))
+    except Exception as e:
+        return json.dumps({"error": f"STAC search failed: {type(e).__name__}: {e}"})
+    feats = raw.get("features") or []
+    scenes = [{"id": f.get("id"), "datetime": (f.get("properties") or {}).get("datetime"),
+               "cloud_cover": (f.get("properties") or {}).get("eo:cloud_cover"),
+               "assets": sorted((f.get("assets") or {}).keys())[:12]} for f in feats]
+    best = min(scenes, key=lambda s: (s["cloud_cover"] is None, s["cloud_cover"] or 1e9)) if scenes else None
+    return json.dumps({"collection": collection, "bbox": b, "matched": len(scenes),
+                       "best_scene": best, "scenes": scenes,
+                       "source": "Microsoft Planetary Computer STAC (keyless)",
+                       "note": "metadata only — call eo_stats for a value over the bbox"}, ensure_ascii=False)
+
+
+def _cdse_token() -> tuple[str | None, str | None]:
+    """CDSE OAuth client from env, else ~/.config/cdse/credentials. Returns (token, error)."""
+    cid = os.environ.get("CDSE_CLIENT_ID") or ""
+    sec = os.environ.get("CDSE_CLIENT_SECRET") or ""
+    if not (cid and sec):
+        path = pathlib.Path(os.environ.get("CDSE_CREDENTIALS")
+                            or pathlib.Path.home() / ".config/cdse/credentials")
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "=" in line and not line.strip().startswith("#"):
+                    k, v = line.split("=", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    cid = cid or (v if k == "CLIENT_ID" else "")
+                    sec = sec or (v if k == "CLIENT_SECRET" else "")
+    if not (cid and sec):
+        return None, ("no Copernicus credentials: set CDSE_CLIENT_ID + CDSE_CLIENT_SECRET, or put "
+                      "CLIENT_ID=/CLIENT_SECRET= in ~/.config/cdse/credentials (free at "
+                      "shapps.dataspace.copernicus.eu/dashboard -> User settings -> OAuth clients)")
+    body = urllib.parse.urlencode({"grant_type": "client_credentials",
+                                   "client_id": cid, "client_secret": sec}).encode()
+    try:
+        raw = json.loads(_http("https://identity.dataspace.copernicus.eu/auth/realms/CDSE/"
+                               "protocol/openid-connect/token", data=body, timeout=60))
+    except Exception as e:
+        return None, f"Copernicus token request failed: {type(e).__name__}: {e}"
+    if "access_token" not in raw:
+        return None, f"Copernicus token rejected: {str(raw)[:200]}"
+    return raw["access_token"], None
+
+
+_EO_EVALSCRIPT = """//VERSION=3
+function setup(){return{input:["B02","B03","B04","B08","B11","dataMask"],
+  output:[{id:"data",bands:1,sampleType:"FLOAT32"},{id:"dataMask",bands:1}]};}
+function evaluatePixel(s){
+  var v;
+  if (INDEX==="NDVI") v=(s.B08-s.B04)/(s.B08+s.B04+1e-9);
+  else if (INDEX==="NDBI") v=(s.B11-s.B08)/(s.B11+s.B08+1e-9);
+  else v=(s.B08-s.B11)/(s.B08+s.B11+1e-9);          // NDMI
+  return{data:[v],dataMask:[s.dataMask]};}"""
+
+
+def eo_stats(bbox, start: str, end: str, index: str = "NDVI", max_cloud: float = 30) -> str:
+    """Mean NDVI / NDBI / NDMI over a bbox, monthly, from Copernicus Sentinel-2 — numbers, no raster.
+
+    Returns statistics only (a few kB), so it is safe on a small machine and cheap enough to call
+    per site. Needs free Copernicus OAuth credentials (see `_cdse_token`); commercial use is
+    permitted with attribution, unlike a Google Earth Engine community project.
+    """
+    b = _bbox4(bbox)
+    if b is None:
+        return json.dumps({"error": "bbox must be 'minx,miny,maxx,maxy' with minx<maxx, miny<maxy"})
+    idx = str(index).upper()
+    if idx not in ("NDVI", "NDBI", "NDMI"):
+        return json.dumps({"error": f"unknown index {index!r}: use NDVI, NDBI or NDMI"})
+    token, err = _cdse_token()
+    if err:
+        return json.dumps({"error": err, "tool": "eo_stats"})
+    evalscript = _EO_EVALSCRIPT.replace("INDEX", f'"{idx}"')
+    span_lon = (b[2] - b[0]) * 92400.0
+    span_lat = (b[3] - b[1]) * 110900.0
+    payload = {
+        "input": {"bounds": {"bbox": b,
+                             "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}},
+                  "data": [{"type": "sentinel-2-l2a",
+                            "dataFilter": {"timeRange": {"from": start + "T00:00:00Z",
+                                                         "to": end + "T23:59:59Z"},
+                                           "maxCloudCoverage": max_cloud}}]},
+        "aggregation": {"timeRange": {"from": start + "T00:00:00Z", "to": end + "T23:59:59Z"},
+                        "aggregationInterval": {"of": "P1M"}, "evalscript": evalscript,
+                        "width": max(1, int(span_lon / 10)), "height": max(1, int(span_lat / 10))},
+        "calculations": {"data": {"statistics": {"default": {}}}},
+    }
+    try:
+        raw = json.loads(_http("https://sh.dataspace.copernicus.eu/api/v1/statistics",
+                               data=json.dumps(payload).encode(),
+                               headers={"Authorization": f"Bearer {token}",
+                                        "Content-Type": "application/json",
+                                        "Accept": "application/json"}, timeout=180))
+    except Exception as e:
+        return json.dumps({"error": f"statistics request failed: {type(e).__name__}: {e}"})
+    months = []
+    for it in raw.get("data") or []:
+        st = (((it.get("outputs") or {}).get("data") or {}).get("bands") or {}).get("B0", {}).get("stats") or {}
+        if st.get("sampleCount"):
+            months.append({"month": (it.get("interval") or {}).get("from", "")[:10],
+                           "mean": round(st["mean"], 4), "samples": st["sampleCount"]})
+    if not months:
+        return json.dumps({"error": "no valid pixels (all cloudy?)", "bbox": b,
+                           "range": [start, end], "index": idx})
+    means = [m["mean"] for m in months]
+    return json.dumps({"index": idx, "bbox": b, "range": [start, end], "months": months,
+                       "mean_of_months": round(sum(means) / len(means), 4),
+                       "source": "Copernicus Sentinel-2 L2A via CDSE Statistical API",
+                       "licence": "Copernicus data policy — free, commercial use with attribution",
+                       "caveat": "10 m pixels averaged over the bbox; not a per-building value"},
+                      ensure_ascii=False)
+
+
 # ---------------------------------------------------------------- MCP wiring
 
 def _safe(fn):
@@ -3217,7 +3367,7 @@ def main():
                  bim_findings, bim_report, publish_findings, publish_scene, webscene_viewer)
     tools = [search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
              geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
-             arcgis_request, publish_layer, dataset_status, spatial_join]
+             arcgis_request, publish_layer, dataset_status, spatial_join, eo_search, eo_stats]
     if (os.environ.get("HK_MCP_BIM") or "1").strip().lower() not in ("0", "false", "off", "no"):
         tools += list(bim_tools)          # HK_MCP_BIM=0 → CSDI-only server, same install
     for fn in tools:

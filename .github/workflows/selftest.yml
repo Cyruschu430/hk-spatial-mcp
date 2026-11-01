@@ -23,3 +23,26 @@ jobs:
 
       - name: MCP stdio protocol test
         run: python test_mcp_client.py
+
+  eval:
+    # Trajectory evaluation: replays frozen traces, so it needs no network, no keys and no server.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Evaluator self-check (stdlib only)
+        run: python eval/trajectory.py
+
+      - name: Replay the frozen traces, twice, and diff
+        run: |
+          python -m eval.run --out /tmp/eval-1.json
+          python -m eval.run --out /tmp/eval-2.json
+          diff /tmp/eval-1.json /tmp/eval-2.json
+          python -m eval.run
+
+      - name: The negative fixture must fail a fabricated trace
+        run: python -m eval.negative_proof

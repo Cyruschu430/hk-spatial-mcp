@@ -1,0 +1,26 @@
+{
+ "id": "q07_geocode_address",
+ "question": "Where is the Hong Kong Observatory in Tsim Sha Tsui? Give coordinates.",
+ "min_calls": 1,
+ "expected_calls": [
+  {
+   "tool": "geocode_address",
+   "args": {
+    "single_line": "Hong Kong Observatory, Tsim Sha Tsui",
+    "max_results": 2
+   }
+  }
+ ],
+ "freeze": [
+  "candidates.0.lon",
+  "candidates.0.lat"
+ ],
+ "value_tolerance": {
+  "candidates.0.lon": 0.0005,
+  "candidates.0.lat": 0.0005
+ },
+ "expected_value": {
+  "candidates.0.lon": 114.173593296,
+  "candidates.0.lat": 22.302070106
+ }
+}

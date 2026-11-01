@@ -1,0 +1,32 @@
+{
+ "id": "q03_slopes_within_500m",
+ "question": "Within ~500 m of 22.337N 114.175E (bbox clip), what is the OZP zone and how many registered man-made slopes are there?",
+ "min_calls": 1,
+ "expected_calls": [
+  {
+   "tool": "site_zoning",
+   "args": {
+    "lat": 22.337,
+    "lon": 114.175,
+    "radius_m": 500
+   }
+  }
+ ],
+ "args_tolerance": {
+  "lat": 0.001,
+  "lon": 0.001
+ },
+ "freeze": [
+  "registered_slopes.count",
+  "zones.0.zone",
+  "bbox.0"
+ ],
+ "expected_value": {
+  "registered_slopes.count": 175,
+  "zones.0.zone": "G/IC(3)",
+  "bbox.0": 114.170144
+ },
+ "value_tolerance": {
+  "bbox.0": 0.0005
+ }
+}

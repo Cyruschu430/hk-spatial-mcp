@@ -1,0 +1,36 @@
+{
+ "id": "q10_negative_dataset",
+ "question": "How many features are in dataset landsd_rcd_0000000000000_00000?",
+ "min_calls": 1,
+ "expected_calls": [
+  {
+   "tool": "load_hk_data",
+   "args": {
+    "dataset_id": "landsd_rcd_0000000000000_00000"
+   }
+  }
+ ],
+ "forbid_tools": [
+  "build_map",
+  "build_scene",
+  "summarise_hk_data",
+  "query_hk_data",
+  "spatial_join",
+  "export_static_svg"
+ ],
+ "fail_on": [
+  "m1",
+  "m2",
+  "m3",
+  "m4",
+  "m5"
+ ],
+ "freeze": [
+  "error"
+ ],
+ "value_tolerance": {},
+ "note": "The dataset does not exist. Reporting absence is correct; inventing a layer or a feature count is a hard fail.",
+ "expected_value": {
+  "error": "~landsd_rcd_0000000000000_00000: HTTP 404"
+ }
+}

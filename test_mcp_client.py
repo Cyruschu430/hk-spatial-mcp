@@ -4,8 +4,7 @@ import json
 import pathlib
 import sys
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+import mcp_client   # one client definition, shared with the eval harness
 
 HERE = pathlib.Path(__file__).resolve().parent
 EXPECTED = {"bim_findings", "bim_report", "publish_findings", "search_hk_data", "load_hk_data", "query_hk_data", "summarise_hk_data", "build_map", "build_scene",
@@ -13,17 +12,15 @@ EXPECTED = {"bim_findings", "bim_report", "publish_findings", "search_hk_data", 
             "geometry_op", "elevation_at", "export_static_map", "export_static_svg", "arcgis_request",
             "publish_layer", "dataset_status", "spatial_join",
             "bim_audit", "bim_floors", "bim_elements", "site_zoning", "lot_check",
-            "webscene_viewer", "publish_scene"}
+            "webscene_viewer", "publish_scene",
+            "eo_search", "eo_stats"}
 
 BIM = ("https://tiles.arcgis.com/tiles/V6ZHFr6zdgNZuVG0/arcgis/rest/services/"
        "Bldg_E_Color_UC2020_demo/SceneServer")
 
 
 async def main():
-    params = StdioServerParameters(command=sys.executable, args=["hk_spatial_mcp.py"], cwd=str(HERE))
-    async with stdio_client(params) as (r, w):
-        async with ClientSession(r, w) as s:
-            await s.initialize()
+    async with mcp_client.session() as s:
             names = [t.name for t in (await s.list_tools()).tools]
             print("tools:", names)
             assert set(names) == EXPECTED, f"unexpected tool set: {sorted(set(names) ^ EXPECTED)}"

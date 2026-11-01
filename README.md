@@ -879,7 +879,9 @@ Two tools take the server from vector GIS into remote sensing without adding a d
 ### `eo_search(collection="sentinel-2-l2a", bbox=None, start="", end="", max_cloud=30, limit=10)`
 
 Scene discovery over a bbox and date range from the Microsoft Planetary Computer STAC API. Returns
-scene ids, datetimes, cloud cover and asset names. Keyless, metadata only — the discovery step.
+scene ids, datetimes, cloud cover, asset names and a `preview` PNG URL for each scene (Planetary
+Computer renders it server-side, so the agent can show an image without decoding a 3 GB COG).
+Keyless, metadata only — the discovery step.
 
 ### `eo_stats(bbox, start, end, index="NDVI", max_cloud=30)`
 

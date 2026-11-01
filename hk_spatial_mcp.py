@@ -3228,7 +3228,10 @@ def eo_search(collection: str = "sentinel-2-l2a", bbox=None, start: str = "", en
     feats = raw.get("features") or []
     scenes = [{"id": f.get("id"), "datetime": (f.get("properties") or {}).get("datetime"),
                "cloud_cover": (f.get("properties") or {}).get("eo:cloud_cover"),
-               "assets": sorted((f.get("assets") or {}).keys())[:12]} for f in feats]
+               "assets": sorted((f.get("assets") or {}).keys())[:12],
+               # MPC already renders each item to a PNG; link it instead of decoding a 3 GB COG
+               "preview": ((f.get("assets") or {}).get("rendered_preview") or {}).get("href")}
+              for f in feats]
     best = min(scenes, key=lambda s: (s["cloud_cover"] is None, s["cloud_cover"] or 1e9)) if scenes else None
     return json.dumps({"collection": collection, "bbox": b, "matched": len(scenes),
                        "best_scene": best, "scenes": scenes,

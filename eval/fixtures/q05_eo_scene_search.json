@@ -20,11 +20,13 @@
  "freeze": [
   "collection",
   "matched",
-  "best_scene.cloud_cover"
+  "best_scene.cloud_cover",
+  "best_scene.preview"
  ],
  "expected_value": {
   "collection": "sentinel-2-l2a",
   "matched": 8,
-  "best_scene.cloud_cover": 2.531007
+  "best_scene.cloud_cover": 2.531007,
+  "best_scene.preview": "~https://planetarycomputer.microsoft.com/"
  }
 }

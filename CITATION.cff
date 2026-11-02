@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software in research or a product, please cite it as below."
+title: "hk-spatial-mcp: an MCP server for Hong Kong CSDI spatial data"
+abstract: >-
+  A zero-dependency Model Context Protocol server that exposes Hong Kong's Common
+  Spatial Data Infrastructure catalogue (1,154 official datasets) to any AI agent:
+  multilingual dataset search, GeoJSON retrieval, numeric answers, and 2D/3D map
+  output, with no API key or GIS installation required.
+authors:
+  - family-names: Chu
+    given-names: Cyrus
+    website: "https://cyruschu.com"
+repository-code: "https://github.com/Cyruschu430/hk-spatial-mcp"
+url: "https://cyruschu430.github.io/hk-spatial-mcp/"
+date-released: 2026-10-22
+license: MIT
+type: software
+keywords:
+  - GIS
+  - geospatial
+  - Hong Kong
+  - CSDI
+  - open data
+  - MCP
+  - Model Context Protocol
+  - AI agents

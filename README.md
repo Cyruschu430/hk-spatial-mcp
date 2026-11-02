@@ -7,6 +7,9 @@ Infrastructure catalogue in English, 繁體中文 or 简体中文, pull real Geo
 numbers and charts, and hand back a 2D map, a 3D scene or a printable static map. **No ArcGIS account,
 no API key, no GIS library, no `npm install`** — one Python process and the open data itself.
 
+> **Built by [Cyrus Chu](https://cyruschu.com)** — GIS × AI, Hong Kong.
+> [cyruschu.com](https://cyruschu.com) · [LinkedIn](https://www.linkedin.com/in/cyrus-chu-287b91337)
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![Protocol](https://img.shields.io/badge/protocol-MCP-6f42c1.svg)](https://modelcontextprotocol.io)

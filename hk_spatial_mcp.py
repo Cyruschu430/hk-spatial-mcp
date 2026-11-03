@@ -30,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from xml.sax.saxutils import escape as _xml_escape
 
 CSDI_CSW = "https://portal.csdi.gov.hk/geoportal/csw"
 CSDI_FILE = "https://portal.csdi.gov.hk/csdi-webpage/file-api?dataset_id={}&format=geojson"
@@ -38,6 +39,9 @@ WORK = pathlib.Path(os.environ.get("HK_MCP_DIR") or "hk-spatial").resolve()
 PORT = int(os.environ.get("HK_MCP_PORT") or 8777)
 BIND = os.environ.get("HK_MCP_BIND") or "127.0.0.1"
 PUBLIC = (os.environ.get("HK_MCP_PUBLIC_URL") or "").rstrip("/")
+# CSDI refreshes on its own schedule (daily for traffic/weather, annual for boundaries). A cached
+# export older than this is re-downloaded before it is quoted as current.
+STALE_DAYS = float(os.environ.get("HK_MCP_STALE_DAYS") or 30)
 
 CSW_BODY = """<?xml version="1.0"?><csw:GetRecords service="CSW" version="2.0.2" maxRecords="{n}" resultType="results" outputSchema="http://www.opengis.net/cat/csw/2.0.2" xmlns:csw="http://www.opengis.net/cat/csw/2.0.2"><csw:Query typeNames="csw:Record"><csw:ElementSetName>summary</csw:ElementSetName><csw:Constraint version="1.1.0"><ogc:Filter xmlns:ogc="http://www.opengis.net/ogc"><ogc:PropertyIsLike wildCard="%" singleChar="_" escapeChar="\\"><ogc:PropertyName>AnyText</ogc:PropertyName><ogc:Literal>%{kw}%</ogc:Literal></ogc:PropertyIsLike></ogc:Filter></csw:Constraint></csw:Query></csw:GetRecords>"""
 
@@ -51,11 +55,18 @@ _TOKEN_HOSTS = ("arcgis.com", "esri.com")
 
 
 def _token_host_ok(url) -> bool:
-    """True when url's host is an Esri domain (or a subdomain of one)."""
+    """True when url is https and its host is an Esri domain (or a subdomain of one).
+
+    The scheme check is not decoration: a token on `http://` is a token in clear text, and the
+    host allowlist alone would let an agent hand ARCGIS_TOKEN to anyone watching the wire.
+    """
     try:
-        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        p = urllib.parse.urlparse(url)
     except ValueError:
         return False
+    if p.scheme != "https":
+        return False
+    host = (p.hostname or "").lower()
     return any(host == h or host.endswith("." + h) for h in _TOKEN_HOSTS)
 
 
@@ -73,8 +84,9 @@ _OPENER = urllib.request.build_opener(_NoLeakRedirect)
 
 
 def _http(url, data=None, headers=None, timeout=60):
-    # ponytail: one retry on 5xx. The public Esri services return a transient 500 now and then
-    # (observed on MapServer/export); a second attempt is cheaper than teaching every caller to retry.
+    # ponytail: one retry. Public Esri/CSDI endpoints return transient 5xx (seen on
+    # MapServer/export) and reset connections under load; a second attempt is cheaper than
+    # teaching every caller to retry.
     last = None
     for attempt in (1, 2):
         req = urllib.request.Request(url, data=data, headers=headers or {})
@@ -86,7 +98,25 @@ def _http(url, data=None, headers=None, timeout=60):
             if e.code < 500 or attempt == 2:
                 raise
             time.sleep(1.5)
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            last = e  # timeouts and resets arrive here, not as HTTPError
+            if attempt == 2:
+                raise
+            time.sleep(1.5)
     raise last
+
+
+def _save(path, text: str) -> None:
+    """Write a cache/page file atomically.
+
+    Two MCP clients (Hermes, Claude Desktop, Cursor) share one workspace; a plain write_text
+    lets the second one read a half-written catalogue, and `_catalog` has no recovery path.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
 
 
 # ---------------------------------------------------------------- CSDI catalogue
@@ -137,8 +167,7 @@ def _catalog(force: bool = False) -> list:
         })
     if not out:
         raise RuntimeError("CSDI catalogue harvest returned 0 records (endpoint changed?)")
-    WORK.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+    _save(cache, json.dumps(out, ensure_ascii=False))
     return out
 
 
@@ -191,8 +220,17 @@ def search_hk_data(keyword: str = "", limit: int = 10, offset: int = 0) -> str:
              "match": d["abstract"][:150] or d["abstract_zh"][:150]}
             for s, d in ranked[offset:offset + limit]]
     if not hits and offset == 0:  # nothing local -> ask the catalogue server (broad recall)
-        body = CSW_BODY.format(n=limit, kw=keyword.replace("%", "").replace("'", "")).encode()
-        xml = _http(CSDI_CSW, body, {"Content-Type": "application/xml"}).decode("utf-8", "replace")
+        # `&`/`<` in a keyword used to reach the server as raw XML and come back 403, which reads
+        # like an outage instead of a bad query. Escape at the boundary; report the rest as data.
+        body = CSW_BODY.format(n=limit, kw=_xml_escape(keyword.replace("%", ""))).encode()
+        try:
+            xml = _http(CSDI_CSW, body, {"Content-Type": "application/xml"}).decode("utf-8", "replace")
+        except Exception as e:
+            return json.dumps({"query": keyword, "matched": 0, "total_datasets": len(cat), "hits": [],
+                               "note": f"the local index had no match and the catalogue server refused "
+                                       f"the fallback query ({type(e).__name__}: {e}) — retry with a "
+                                       f"synonym or a shorter Chinese term"},
+                              ensure_ascii=False)
         hits = [{"dataset_id": t[0], "title": re.sub(r"\s+", " ", t[1]).strip(), "source": "csw"}
                 for t in ((i, x) for i, x in zip(re.findall(r"<dc:identifier>(.*?)</dc:identifier>", xml, re.S),
                                                  re.findall(r"<dc:title>(.*?)</dc:title>", xml, re.S)))]
@@ -206,8 +244,8 @@ def load_hk_data(dataset_id: str, name: str = "", refresh: bool = False) -> str:
     data itself — never paste the features into the chat, put them on a map with build_map().
     The local copy is reused on later calls; pass refresh=True to re-download."""
     path = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', dataset_id)}.geojson"
-    cached = path.exists() and not refresh
-    fc = None
+    age = (time.time() - path.stat().st_mtime) / 86400 if path.exists() else 0.0
+    cached, fc, warning = path.exists() and not refresh and age <= STALE_DAYS, None, ""
     if cached:
         try:
             fc = json.loads(path.read_text(encoding="utf-8"))
@@ -217,33 +255,41 @@ def load_hk_data(dataset_id: str, name: str = "", refresh: bool = False) -> str:
         try:
             fc = json.loads(_http(CSDI_FILE.format(urllib.parse.quote(dataset_id)), timeout=180))
         except urllib.error.HTTPError as e:
-            return json.dumps({
-                "error": f"{dataset_id}: HTTP {e.code} from the CSDI export endpoint",
-                "likely": "metadata-only / non-spatial dataset (13 of ~1150 have no GeoJSON export), "
-                          "or the id is wrong — call search_hk_data() and use a hit whose exportable is true",
-                "metadata_page": f"https://portal.csdi.gov.hk/geoportal/rest/metadata/item/{dataset_id}/html",
-            }, ensure_ascii=False)
+            if path.exists():  # never drop a good copy because a refresh failed
+                fc = json.loads(path.read_text(encoding="utf-8"))
+                warning = (f"re-download failed (HTTP {e.code}); serving the cached copy from "
+                           f"{age:.0f} days ago — it may no longer match the published dataset")
+            else:
+                return json.dumps({
+                    "error": f"{dataset_id}: HTTP {e.code} from the CSDI export endpoint",
+                    "likely": "metadata-only / non-spatial dataset (13 of ~1150 have no GeoJSON export), "
+                              "or the id is wrong — call search_hk_data() and use a hit whose exportable is true",
+                    "metadata_page": f"https://portal.csdi.gov.hk/geoportal/rest/metadata/item/{dataset_id}/html",
+                }, ensure_ascii=False)
     feats = fc.get("features") or []
     if not feats:
         return json.dumps({"error": f"{dataset_id}: dataset returned 0 features (not spatial or empty)"})
     if not cached:
-        (WORK / "data").mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(fc, ensure_ascii=False), encoding="utf-8")
+        _save(path, json.dumps(fc, ensure_ascii=False))
+        age = 0.0
     if name:  # sidecar so build_map can label the layer with the dataset title
         path.with_suffix(".name").write_text(name, encoding="utf-8")
     lons, lats = [], []
     for f in feats:
         for x, y in _coords(f.get("geometry") or {}):
             lons.append(x), lats.append(y)
-    return json.dumps({
+    out = {
         "dataset_id": dataset_id, "features": len(feats),
         "geometry": sorted({(f.get("geometry") or {}).get("type") or "?" for f in feats}),
         "fields": list((feats[0].get("properties") or {}).keys())[:20],
         "bbox": [round(min(lons), 5), round(min(lats), 5), round(max(lons), 5), round(max(lats), 5)]
         if lons else None,
-        "file": str(path), "cached": cached,
+        "file": str(path), "cached": cached, "cached_days": round(age, 1) if cached else 0,
         "next": "call build_map([dataset_id, ...]) to see it in the ArcGIS web map",
-    }, ensure_ascii=False)
+    }
+    if warning:
+        out["warning"] = warning
+    return json.dumps(out, ensure_ascii=False)
 
 
 
@@ -364,7 +410,9 @@ def _serve():
         h = lambda *a, **k: SimpleHTTPRequestHandler(*a, directory=str(WORK), **k)
         try:
             srv = ThreadingHTTPServer((BIND, PORT), h)
-        except OSError:  # port already serving an earlier run — fine, nothing to do
+        except OSError as e:  # port taken: say so, because that url may be someone else's app
+            _serve_state["warning"] = (f"port {PORT} is already in use ({e}); the map url may be served "
+                                       f"by another process — set HK_MCP_PORT to a free port and rebuild")
             _serve_state["up"] = True
             return
         threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -472,13 +520,16 @@ def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page:
     (WORK / page).write_text(html, encoding="utf-8")
     _serve()
     base = (PUBLIC + "/" if PUBLIC else f"http://localhost:{PORT}/")
-    return json.dumps({"url": base + slug_page,
-                       "latest_url": base + (page if page != "index.html" else ""),
-                       "mode": mode,
-                       "layers": [l["id"] for l in layers],
-                       "features": sum(l.get("count", 0) for l in layers),
-                       "missing": missing, "warn": warn,
-                       "next": "open the url in your client's browser/preview pane (refresh to see changes)"})
+    out = {"url": base + slug_page,
+           "latest_url": base + (page if page != "index.html" else ""),
+           "mode": mode,
+           "layers": [l["id"] for l in layers],
+           "features": sum(l.get("count", 0) for l in layers),
+           "missing": missing, "warn": warn,
+           "next": "open the url in your client's browser/preview pane (refresh to see changes)"}
+    if _serve_state.get("warning"):
+        out["warning"] = _serve_state["warning"]
+    return json.dumps(out)
 
 
 # ------------------------------------------------- ArcGIS public services (no key)

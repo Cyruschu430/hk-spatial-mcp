@@ -36,6 +36,16 @@ CSDI is the source of truth: 1,150+ official Hong Kong datasets. The map rendere
 - Do the arithmetic locally when it is simple (distance, counts). Use the service when you need real
   projection or a proper geodesic buffer.
 
+## Earth observation (satellite — discovery is keyless)
+
+- `eo_search(bbox="minx,miny,maxx,maxy", start="YYYY-MM-DD", end="YYYY-MM-DD", collection="sentinel-2-l2a",
+  max_cloud=30, limit=10)` → scene metadata from Microsoft Planetary Computer, plus a 512 px preview
+  PNG per scene. The preview is the whole granule — say so, do not imply it was cut to the bbox.
+  Collections: sentinel-2-l2a, landsat-c2-l2, naip, cop-dem-glo-30, sentinel-1-rtc, io-lulc-annual-v02.
+- `eo_stats(bbox, start, end, index="NDVI"|"NDBI"|"NDMI", max_cloud=30)` → mean index per month,
+  statistics only (a few kB, no raster). Needs free Copernicus OAuth credentials; without them the
+  tool says which variable is missing instead of guessing a value.
+
 ## What needs a token, and what does not
 
 Keyless and verified: the Geometry service (project/buffer/simplify), the World Geocoder, basemap and

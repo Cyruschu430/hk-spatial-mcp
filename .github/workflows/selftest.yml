@@ -18,6 +18,12 @@ jobs:
       - name: Install the single dependency
         run: pip install "mcp>=1.2"
 
+      - name: Offline regression tests (no network, no key)
+        run: |
+          python test_security.py
+          python test_cache_freshness.py
+          python test_spatial_join.py
+
       - name: Self-test (catalogue, search, load, map, geocode, geometry, elevation, static export)
         run: python hk_spatial_mcp.py --selftest
 

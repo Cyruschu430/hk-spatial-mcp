@@ -3075,7 +3075,7 @@ _SCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}
 <div id="view"></div>
 <div id="panel"><h4>BIM FINDINGS · 3D</h4><ul>{legend}</ul>
 <button id="recentre" type="button" onclick="window.__recentre()">重設視角 · Re-centre</button>
-<div style="margin-top:8px;color:#c53030;font-size:11px">柱高 12 m，僅作定位提示，非實際構件</div>
+<div style="margin-top:8px;color:#c53030;font-size:11px">發光點僅作定位提示，非實際構件</div>
 <div style="margin-top:6px;color:#4a5568">Powered by Esri</div></div>
 <div id="hint">拖曳旋轉 · 滾輪縮放 · 右鍵平移</div>
 <div id="msg">載入中…</div>
@@ -3086,7 +3086,8 @@ require(["esri/Map","esri/views/SceneView","esri/layers/BuildingSceneLayer","esr
 function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic, PopupTemplate, idMgr) {{
   const msg = document.getElementById("msg");
   const COLOURS = {{ duplicate_mark: "#c53030", no_dimension: "#b7791f", slab_coverage: "#2b6cb0" }};
-  const gLayer = new GraphicsLayer({{ title: "Findings" }});
+  const gLayer = new GraphicsLayer({{ title: "Findings",
+    elevationInfo: {{ mode: "relative-to-ground", offset: 1.0 }} }});
   const map = new Map({{ basemap: "satellite", ground: "world-elevation", layers: [gLayer] }});
   const CAM = {{ longitude: {cam_lon}, latitude: {cam_lat}, heading: 25, tilt: 62, above: {cam_above} }};
   // ponytail: goTo the layer's own extent, never a hand-computed camera. A camera set
@@ -3131,6 +3132,9 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
   function frame() {{ return window.__recentre(); }}
   const view = new SceneView({{ container: "view", map: map,
     camera: {{ position: {{ latitude: {cam_lat}, longitude: {cam_lon}, z: 600 }}, tilt: 62 }} }});
+  // cyan halo on click-selection, not the SDK's orange default block
+  view.highlightOptions = {{ color: [0, 200, 255], haloColor: [0, 200, 255],
+                             haloOpacity: 0.9, fillOpacity: 0.15 }};
   window.__view = view;      // debugging handle: view.takeScreenshot() and camera state
 
   // BIM first, so it draws under the markers. Empty service = slpk source, markers only.
@@ -3170,9 +3174,13 @@ function(Map, SceneView, BuildingSceneLayer, SceneLayer, GraphicsLayer, Graphic,
       const pr = f.properties, c = COLOURS[pr.finding] || "#7f7f7f";
       gLayer.add(new Graphic({{
         geometry: {{ type: "point", longitude: f.geometry.coordinates[0], latitude: f.geometry.coordinates[1] }},
-        symbol: {{ type: "point-3d", symbolLayers: [{{ type: "object",
-          resource: {{ primitive: "cylinder" }}, material: {{ color: c }},
-          height: 12, width: 2.4, anchor: "bottom" }}] }},
+        symbol: {{ type: "point-3d", symbolLayers: [
+          // halo: a big, faint sphere — reads as a glow without any bloom pass
+          {{ type: "object", resource: {{ primitive: "sphere" }},
+            material: {{ color: c + "30" }}, height: 3.4, width: 3.4, depth: 3.4 }},
+          // core
+          {{ type: "object", resource: {{ primitive: "sphere" }},
+            material: {{ color: c }}, height: 1.2, width: 1.2, depth: 1.2 }}] }},
         attributes: pr,
         popupTemplate: {{ title: pr.finding,
           content: pr.detail + "<br/>Category: " + pr.Category + "<br/>Type: " + pr.FamilyType +

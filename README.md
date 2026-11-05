@@ -627,6 +627,14 @@ The mechanism matters if you extend this. Measured in a browser, not assumed:
 | `sublayer.definitionExpression` | **no effect** — 0.0% pixel change |
 | `sublayer.queryFeatures` / `queryExtent` | **throws** `query-not-available` on the sublayer too |
 | `BuildingFilter` on `OBJECTID` | **matches ~17 elements, not 1** |
+| `1=1` as `x-ray` (context pass) | **draws nothing** — the solid block goes too; use `wire-frame` |
+| `import .../support/BuildingFilterBlock.js` | **404 on the 4.31 CDN** — there is no such module |
+
+`BuildingFilterBlock` is constructible only through the collection: pass **plain object literals** in
+`filterBlocks` and the SDK coerces them (each comes back with
+`declaredClass === "esri.layers.support.BuildingFilterBlock"`). Importing the class by path fails, and
+because it fails inside a `Promise.all` of module imports it takes the whole viewer down with it —
+the symptom is a module-load rejection, not a filter problem.
 
 The last two rows contradict the published guidance, which says to query the *sublayer* rather than the
 root and to isolate one component with `OBJECTID = n`. On a hosted BSL neither holds: both query methods
@@ -671,6 +679,12 @@ Mode values are hyphenated: `{ type: "wire-frame" }`, `{ type: "x-ray" }`, `{ ty
 `wireframe` / `xray` are accepted at construction and then throw inside the SDK
 (`Cannot read properties of null (reading 'type')`).
 
+All three names parse, but they are not interchangeable in practice: **`x-ray` is not a usable ghost
+pass on a hosted i3s layer.** Asked for the whole building as `1=1` in `x-ray`, the layer stops drawing
+*everything* — the solid target block included — so the tower goes blank instead of becoming
+translucent. `wire-frame` never does this and is the only context mode worth reaching for. If a filtered
+scene goes empty while the unfiltered one renders, the filter block is the suspect, not the service.
+
 ### `bim_clear(source="")`
 
 Whole model, no selection, no filter. `state_rev` advances, so the open page visibly resets.
@@ -681,6 +695,14 @@ axis meets the ground, so with the eye at height `z` and tilt `t` the camera mus
 *behind* the target along the heading — placing it there centres the target in one step
 (measured error: 2 px horizontal, 27 px vertical) instead of iterating a feedback loop that never
 converged.
+
+The inverse is where this goes wrong, and it fails silently. `tilt` is measured **from vertical**
+(0 = straight down, 90 = horizon), so when you have a horizontal distance `d` and want the eye
+height, it is `d·tan(90 − t)` — **not** `d·tan(t)`. Using `tan(t)` raises the eye roughly twice as
+far as intended and the building leaves the frame entirely, which looks exactly like "the layer
+failed to load". If a hand-placed camera shows an empty scene while the panel reports elements and
+nodes, check this term before you debug the service. `d·tan(90 − t)` at `d = 480 m`, `t = 62°` puts
+the eye at 255 m over the target and frames a 168 m tower whole.
 
 The vertical aim is the element's own storey elevation (`BldgLevel_Elev`), not a fixed height.
 Storey numbers are not heights: on ZCB, `BldgLevel = 10` sits at 3.95 m. Aiming a door at a
@@ -895,6 +917,14 @@ Measured on a 2 vCPU / 3.5 GB VPS with a warm catalogue cache:
 The 3D scene is heavier on the client: same data plus terrain tiles and WebGL. On a GPU-less headless
 browser it stays saturated well past 30 s, which says nothing useful about a real machine — open
 `scene.html` locally and read `window.__readyMs` in the console for your own number.
+
+**When you screenshot a 3D page to check it, do not use `--virtual-time-budget`.** Virtual time
+fast-forwards timers, so the capture fires before streamed i3s tiles arrive and the result is a blank
+or half-empty scene. It is easy to misread that as a broken layer; it is a measurement artefact. Drive
+Chrome over the DevTools protocol and wait real wall-clock seconds instead — Node 22 has a built-in
+`WebSocket`, so no Puppeteer is needed: `Target.createTarget` → `Target.attachToTarget` →
+`Page.navigate` → sleep → `Page.captureScreenshot`. The same caveat applies to `hitTest`, which
+returns empty for BSL geometry even when the model is visibly on screen.
 
 The model-facing cost is small by design: a full search → load → build_map flow returns roughly
 2,600 characters of JSON, so the agent does not need long reasoning to produce a map.

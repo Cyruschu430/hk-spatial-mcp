@@ -12,6 +12,8 @@ EXPECTED = {"bim_findings", "bim_report", "publish_findings", "search_hk_data", 
             "geometry_op", "elevation_at", "export_static_map", "export_static_svg", "arcgis_request",
             "publish_layer", "dataset_status", "spatial_join",
             "bim_audit", "bim_floors", "bim_elements", "site_zoning", "lot_check",
+            # the interactive half of the BIM set: open, filter, fly to a component, reset
+            "bim_viewer", "bim_filter", "bim_select", "bim_clear",
             "webscene_viewer", "publish_scene",
             "eo_search", "eo_stats"}
 

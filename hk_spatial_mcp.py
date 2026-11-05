@@ -3706,6 +3706,8 @@ const selLayer = new GraphicsLayer({ title: "Selection" });
 const map = new Map({ basemap: "satellite", ground: "world-elevation", layers: [selLayer] });
 const view = new SceneView({ container: "view", map,
   camera: { position: { longitude: 114.1694, latitude: 22.3193, z: 1200 }, tilt: 60, heading: 20 } });
+  view.highlightOptions = { color: [0, 200, 255], haloColor: [0, 200, 255],
+                            haloOpacity: 0.9, fillOpacity: 0.15 };
 window.__view = view;
 const sleep2 = sleep;
 
@@ -3911,8 +3913,11 @@ function drawSelection(sel) {
   sel.points.slice(0, 400).forEach((p, i) => {
     selLayer.add(new Graphic({
       geometry: { type: "point", longitude: p.lon, latitude: p.lat, z: 1.5 },
-      symbol: { type: "point-3d", symbolLayers: [{ type: "object", resource: { primitive: "cylinder" },
-        material: { color: [220, 38, 38, 0.55] }, height: 9, width: 1.6, anchor: "bottom" }] },
+      symbol: { type: "point-3d", symbolLayers: [
+        { type: "object", resource: { primitive: "sphere" },
+          material: { color: [220, 38, 38, 0.18] }, height: 3.4, width: 3.4, depth: 3.4 },
+        { type: "object", resource: { primitive: "sphere" },
+          material: { color: [220, 38, 38, 0.95] }, height: 1.2, width: 1.2, depth: 1.2 }] },
       attributes: { n: i + 1 },
     }));
   });

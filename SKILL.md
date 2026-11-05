@@ -237,6 +237,34 @@ localhost. Three checks that look like defects but are not: Zoom/Compass expose 
 `title`, not `aria-label`; `Search.allSources` populates asynchronously after `when()`; and a failed
 request with `errorText` `net::ERR_ABORTED` was cancelled, not blocked.
 
+### When the ground is missing, or the model looks wrong
+
+Four failures that produce a plausible-looking page with no error, each verified on SDK 5.0:
+
+| symptom | cause | fix |
+|---|---|---|
+| no ground at all; `map.basemap === null` | `basemap: "light-gray"` is **not a valid id** — `Basemap.fromId()` returns `null` and `Map` drops it silently | `"gray-vector"` (also `streets-vector`, `topo-vector`, `satellite`, `dark-gray-vector`) |
+| model tinted gold/yellow | `environment.lighting` defaults to a **date-based sun** | `lighting: { type: "virtual" }` |
+| lighting ignored on first paint | set in the constructor, the sun shades the early frames anyway | `await view.when()` → set `lighting` → *then* add the building layer |
+| background colour ignored | bare `{ color: … }` fails autocast | `background: { type: "color", color: "#eef1f6" }` |
+
+Verify a basemap **by object**, never by eye: `view.map.basemap.baseLayers.getItemAt(0).title` should
+read `"Light Gray Base"`. A `null` basemap still paints grey, which is why this survives review.
+
+A bare BuildingSceneLayer also takes far longer than a GeoJSON scene — around **110 s** for a
+40 k-element model. Sampled at 50–60 s it draws as **bare stacked floor slabs**, which looks exactly
+like a geometry bug. Wait past two minutes before diagnosing anything.
+
+### Do not compare variants with several SceneViews on one page
+
+It yields confident, wrong results. Three views on one page all reported `zoom 15.38 / scale 13913`
+— pinned, and believable — while the same code alone on its own page reported `zoom 18.59 / scale
+1501` with the `tilt` actually requested. Neither `center`+`scale`, an explicit `Camera`, nor
+`goTo({ scale })` was at fault; the crowded harness was.
+
+The tell is a `tilt` near **0** (a top-down view nobody asked for) next to a scale that ignores every
+input. Run one variant per page.
+
 ## Rules
 
 - Keep "Powered by Esri" attribution on every map.

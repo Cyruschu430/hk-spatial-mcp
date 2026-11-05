@@ -58,6 +58,12 @@ async def main():
                 assert not res.is_error, f"{name}: protocol-level error {res.content[0].text[:200]}"
                 return json.loads(res.content[0].text)
 
+            def _live_state(handle):
+                """The bridge the page polls — read it straight off disk to check what the
+                viewer was actually told to draw, not just what the tool replied."""
+                fp = pathlib.Path(env["HK_MCP_DIR"]) / "live" / f"{handle}.json"
+                return json.loads(fp.read_text(encoding="utf-8"))
+
             # 0. tool schemas must survive the _safe wrapper (functools.wraps + signature follow)
             tools = {t.name: t for t in (await s.list_tools()).tools}
             props = tools["bim_audit"].input_schema.get("properties") or {}
@@ -149,6 +155,84 @@ async def main():
             assert r["matched"] == 0 and r["field_values"][0]["sample_values"], r
             print("8 hints      : where_parse + no-such-field + sample_values")
 
+            # 9. interactive viewer: element identity + the live state bridge.
+            #    `uid` is sublayer/node:id — the only unique key, because i3s feature ids
+            #    restart inside a node AND node ids restart in every sublayer (on ZCB,
+            #    ids=[33] matches 17 distinct elements across 17 sublayers).
+            v = await call("bim_viewer", {"source": ZCB_ITEM})
+            assert v.get("viewer") and v.get("url"), v
+            assert v["elements"] > 1000, v
+            assert all(x["level"] != "-2147483648" for x in v["levels"]), v["levels"]
+            handle = v["viewer"]
+
+            # 9a. the handle is accepted everywhere, not only by the viewer tools
+            r = await call("bim_elements", {"source": handle, "where": "Category=door", "limit": 3})
+            assert r.get("matched", 0) > 0, r
+            uid = r["rows"][0]["uid"]
+            assert uid.count("/") == 1 and ":" in uid, uid          # 'Doors/0:33'
+
+            # 9b. one uid identifies exactly one element; a bare id does not
+            one = await call("bim_select", {"source": handle, "uids": [uid], "isolate": False})
+            assert one["matched"] == 1, one
+            many = await call("bim_select", {"source": handle, "ids": [r["rows"][0]["id"]],
+                                             "isolate": False})
+            assert many["matched"] >= 1, many
+            print(f"9 viewer     : handle accepted; uid {uid!r} -> 1 element, "
+                  f"bare id -> {many['matched']} (uid is the exact key)")
+
+            # 9c. filter reports a real element count and refuses an unknown category
+            f = await call("bim_filter", {"source": handle, "floors": "5"})
+            assert f["expression"] == "BldgLevel IN (5)", f
+            assert 0 < f["elements_shown"] < f["elements_total"], f
+            bad = await call("bim_filter", {"source": handle, "categories": "Nope"})
+            assert bad.get("error", "").startswith("no such category"), bad
+
+            # 9d. select-nothing is refused, and an unknown uid is reported not ignored
+            empty = await call("bim_select", {"source": handle, "isolate": False})
+            assert "nothing to select" in json.dumps(empty), empty
+            miss = await call("bim_select", {"source": handle, "uids": ["Nope/9:9"],
+                                             "isolate": False})
+            assert miss["matched"] == 0 and miss.get("unknown_uids") == ["Nope/9:9"], miss
+            print(f"9c filter    : floors=5 -> {f['elements_shown']}/{f['elements_total']}; "
+                  f"bad category + empty select + unknown uid all refuse cleanly")
+
+            # 9e. the bridge is a file the page polls: rev must advance on every write
+            c1 = await call("bim_clear", {"source": handle})
+            c2 = await call("bim_filter", {"source": handle, "floors": "5"})
+            c3 = await call("bim_clear", {"source": handle})
+            revs = [c1["state_rev"], c2["state_rev"], c3["state_rev"]]
+            assert revs == sorted(set(revs)), revs
+            print(f"9e bridge    : state_rev advances on every call {revs}")
+
+            # 9f. ghost mode: a focused selection keeps the rest of the building as a
+            #     wire-frame outline instead of hiding it. Two things must hold —
+            #     (a) the predicate names the Category ATTRIBUTE ('door'), not the sublayer
+            #         ('Doors'), and (b) no sublayer visibility list is written, because the
+            #         shell sublayers (ExteriorShell, Site, Stairs) are absent from the element
+            #         catalogue and would stay solid over the ghost.
+            g = await call("bim_select", {"source": handle, "uids": [uid]})
+            assert g["ghost"] is True, g
+            live = _live_state(handle)
+            assert live.get("ghost") is True, live
+            assert not (live.get("hidden") or []), live.get("hidden")
+            expr = (live.get("filter") or {}).get("expression") or ""
+            assert "Category IN ('door')" in expr, expr
+            # a wide selection must NOT ghost — the outline of everything is noise
+            wide = await call("bim_select", {"source": handle, "where": "Discipline=Structural"})
+            assert wide["matched"] > 200, wide
+            assert wide["ghost"] is False, wide
+            print(f"9f ghost     : '{expr}' + 0 hidden sublayers; "
+                  f"{wide['matched']}-element select leaves ghost off")
+
+            # 9g. the camera aim height comes from the storey elevation, not a fixed 12 m:
+            #     a storey-10 door sits at 3.95 m here, so aiming at 12 m put it low in frame.
+            #     It must also be a finite number — NaN here writes invalid JSON and the page
+            #     drops the whole update (seen when averaging rows with unset elevations).
+            assert g["camera"]["aim_z"] is not None, g
+            assert 0 < g["camera"]["aim_z"] < 60, g["camera"]
+            assert "NaN" not in json.dumps(live), "state file carries NaN — not valid JSON"
+            print(f"9g aim_z     : {g['camera']['aim_z']} m from BldgLevel_Elev (not a fixed 12 m)")
+
             # 9. publish_scene e2e — token-gated; publishes GrandCentral as a PRIVATE hosted
             #    scene layer, verifies it answers, then deletes both items (org hygiene).
             if os.environ.get("ARCGIS_TOKEN"):
@@ -173,10 +257,10 @@ async def main():
                         "path": f"content/users/{user}/items/{iid}/delete",
                         "params": {}, "method": "POST"})
                     assert d.get("success"), d
-                print(f"9 scene      : refused non-package; published PRIVATE scene layer, "
+                print(f"10 scene     : refused non-package; published PRIVATE scene layer, "
                       f"verified, deleted ({len(chk['layers'])} layers)")
             else:
-                print("9 scene      : skipped (no ARCGIS_TOKEN in env)")
+                print("10 scene     : skipped (no ARCGIS_TOKEN in env)")
 
     print("bim regressions OK")
 

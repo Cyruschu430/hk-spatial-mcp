@@ -111,11 +111,29 @@ def _save(path, text: str) -> None:
 
     Two MCP clients (Hermes, Claude Desktop, Cursor) share one workspace; a plain write_text
     lets the second one read a half-written catalogue, and `_catalog` has no recovery path.
+
+    The live-viewer state file is polled by the open page every 1.2 s, and on Windows a file
+    with a reader on it cannot be replaced (`os.replace` -> WinError 5). Retrying briefly is
+    what makes the tool <-> page bridge reliable; without it the tools fail intermittently
+    exactly when a viewer is open, which is the only time they are used.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(12):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 11:
+                # last resort: a non-atomic write still beats failing the whole tool call
+                path.write_text(text, encoding="utf-8")
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                return
+            time.sleep(0.04 * (attempt + 1))
 
 
 
@@ -278,12 +296,31 @@ def load_hk_data(dataset_id: str, name: str = "", refresh: bool = False) -> str:
     for f in feats:
         for x, y in _coords(f.get("geometry") or {}):
             lons.append(x), lats.append(y)
+    # Some CSDI exports are attribute-only: the GeoJSON is well formed and every feature is
+    # `geometry: null`, so `features` looks healthy while nothing can be drawn. LandSD "Building"
+    # is 87,982 features / 0 geometries (verified live 2026-11-05); "Lot" is 1,606 / 0. Left
+    # unguarded, load_hk_data reported success and build_map then drew an empty map, which reads
+    # as a tool bug rather than a property of the dataset.
+    if not lons:
+        return json.dumps({
+            "error": f"{dataset_id}: {len(feats)} features, but none carry geometry",
+            "detail": "every feature in this export is `geometry: null` — it is attribute-only, so "
+                      "no spatial tool can place it (no bbox, nothing to draw, no spatial join)",
+            "still_usable": "its attributes are readable: query_hk_data() and summarise_hk_data() "
+                            "work normally on the cached copy",
+            "known": ["LandSD Building — 87,982 features, 0 geometries",
+                      "LandSD Lot — 1,606 features, 0 geometries"],
+            "alternative": "for a mappable substitute use the ArcGIS mirror: Lot polygons as "
+                           "Lot_in_Hong_Kong/FeatureServer/0 on services3.arcgis.com "
+                           "(query via arcgis_request), or pick a neighbouring dataset that "
+                           "does export geometry — check `exportable` in search_hk_data()",
+            "file": str(path),
+        }, ensure_ascii=False)
     out = {
         "dataset_id": dataset_id, "features": len(feats),
         "geometry": sorted({(f.get("geometry") or {}).get("type") or "?" for f in feats}),
         "fields": list((feats[0].get("properties") or {}).keys())[:20],
-        "bbox": [round(min(lons), 5), round(min(lats), 5), round(max(lons), 5), round(max(lats), 5)]
-        if lons else None,
+        "bbox": [round(min(lons), 5), round(min(lats), 5), round(max(lons), 5), round(max(lats), 5)],
         "file": str(path), "cached": cached, "cached_days": round(age, 1) if cached else 0,
         "next": "call build_map([dataset_id, ...]) to see it in the ArcGIS web map",
     }
@@ -480,6 +517,13 @@ def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page:
         fc = json.loads(p.read_text(encoding="utf-8"))
         feats = fc.get("features") or []
         gtype = ((feats[0].get("geometry") or {}).get("type") or "Point") if feats else "Point"
+        # An attribute-only export (every `geometry: null`) would otherwise be added as a Point
+        # layer: the reply says "87,982 features" and the map draws nothing. Refuse it here too,
+        # so a map built from a cached file cannot contradict load_hk_data().
+        if feats and not any(f.get("geometry") for f in feats):
+            missing.append(f"{did}: {len(feats)} features carry no geometry (attribute-only "
+                           f"export) — omitted from the map; query_hk_data() can still read it")
+            continue
         # Every layer is served from disk and referenced by URL. GeoJSONLayer with an inline `blob`
         # fails to load on SDK 5.0 ("Cannot read properties of null (reading 'type')"), and urls keep
         # the HTML small for big layers — one code path, no size threshold.
@@ -1874,6 +1918,19 @@ def _bim_service(source):
     s = (source or "").strip()
     if s.startswith(("http", "slpk://")):
         return s.rstrip("/")
+    # A 10-char viewer handle from bim_viewer() is not a source, but every BIM tool takes
+    # the same `source` argument and a caller that has just called bim_viewer() will hand
+    # the handle straight back. Resolve it here so all of them accept it identically.
+    if re.fullmatch(r"[0-9a-fA-F]{10}", s):
+        for fp in (WORK / "live").glob("*.json"):
+            if fp.stem == s:
+                try:
+                    d = json.loads(fp.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if d.get("service"):
+                    return _bim_service(d["service"])
+        raise ValueError(f"unknown viewer handle {s!r} — call bim_viewer() to create one")
     if re.fullmatch(r"[0-9a-fA-F]{32}", s):
         item = json.loads(_http(_with_token(f"{AGOL}/content/items/{s}?f=json")))
         url = (item.get("url") or "").rstrip("/")
@@ -1885,7 +1942,7 @@ def _bim_service(source):
             raise ValueError(f"AGOL item error: {item['error'].get('message')}")
         raise ValueError(f"item has no service url — it is a {item.get('type') or 'unknown'} item, "
                          "not a scene service or Scene Package")
-    raise ValueError("pass a SceneServer url or a 32-char AGOL item id")
+    raise ValueError("pass a SceneServer url, a 32-char AGOL item id, or a bim_viewer() handle")
 
 
 def _legacy_node_ids(base):
@@ -2020,8 +2077,13 @@ def _bim_sublayer(service):
     return _bim_sublayers(service)[0]
 
 
-_BIM_ROWS_V = 5   # v5: coverage splits structural empties from real failures
-_BIM_LAYER_V = 5  # v5: + i3s 1.4-1.6 node-tree fallback (stale 0-node caches must expire)
+_BIM_ROWS_V = 8   # v8: partial reads are no longer cached (a v7 cache may hold a short model)
+_BIM_LAYER_V = 8  # v8: + per-node retry; a failed node is reported, never silently dropped
+
+# Above this many matched elements the wire-frame context block is dropped: the outline of a
+# whole building is not a useful frame for a hundred glowing elements, and the extra block
+# costs draw time. Below it, ghosting is what makes a single component readable in context.
+GHOST_MAX_HITS = 200
 
 
 def _reproject_rows(rows, wkid):
@@ -2071,16 +2133,29 @@ def _bim_layer_rows(base, meta, refresh=False):
     def feats(nid):
         # i3s interior nodes legitimately carry no features of their own (geometry lives
         # in the leaves) — a missing page is 'empty', a broken one is 'failed'.
-        try:
-            d = json.loads(_i3s_get(_with_token(f"{base}/nodes/{nid}/features/0")))
-        except FileNotFoundError:
-            return nid, [], "empty"
-        except urllib.error.HTTPError as e:
-            return nid, [], "empty" if e.code == 404 else "failed"
-        except Exception:
-            return nid, [], "failed"
-        return nid, [(f.get("id"), f.get("mbb") or [], f.get("position") or [])
-                     for f in d.get("featureData", [])], "ok"
+        #
+        # A 'failed' node used to be dropped silently and then CACHED, so one transient reset
+        # during the 10-way parallel fetch permanently lost a node's elements: measured 14,215
+        # rows instead of 14,416 on ZCB after a single simulated reset, and every later call
+        # inherited the short count. `_http` only retries 5xx/URLError twice, so retry here as
+        # well — three attempts with a short backoff turns a blip into a slower read, not a
+        # smaller building.
+        for attempt in range(3):
+            try:
+                d = json.loads(_i3s_get(_with_token(f"{base}/nodes/{nid}/features/0")))
+                return nid, [(f.get("id"), f.get("mbb") or [], f.get("position") or [])
+                             for f in d.get("featureData", [])], "ok"
+            except FileNotFoundError:
+                return nid, [], "empty"
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return nid, [], "empty"
+                err = e
+            except Exception as e:
+                err = e
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+        return nid, [], ("missing" if isinstance(err, FileNotFoundError) else "failed")
 
     with _Pool(10) as ex:
         res = list(ex.map(feats, ids))
@@ -2102,11 +2177,17 @@ def _bim_layer_rows(base, meta, refresh=False):
                                ex.map(lambda n, k=info[f]: attr(n, k, len(active[n])), active.keys())))
 
     rows = []
+    sl_name = meta.get("name") or ""
     for nid, fl in active.items():
         cols = {f: data[f].get(nid) for f in fields}
         for i, (fid, mbb, pos) in enumerate(fl):
-            row = {"id": fid, "mbb": mbb, "lon": pos[0] if pos else None,
-                   "lat": pos[1] if pos else None}
+            row = {"id": fid, "node": nid, "mbb": mbb,
+                   "lon": pos[0] if pos else None, "lat": pos[1] if pos else None}
+            # i3s ids restart twice over: feature ids repeat inside a sublayer ('GenericModel':
+            # 5,191 rows / 1,312 ids) and node ids repeat across sublayers (95 distinct node
+            # ids over 584 sublayer/node pairs). The triple is what actually names one element,
+            # and `uid` is the single token to quote in a chat and to select by.
+            row["uid"] = f"{sl_name}/{nid}:{fid}"
             for f in fields:
                 c = cols[f]
                 row[f] = c[i] if c and i < len(c) else None
@@ -2124,7 +2205,14 @@ def _bim_layer_rows(base, meta, refresh=False):
                         **({"nodes_failed": n_failed} if n_failed else {}),
                         "attr_failed": {f: n for f, n in attr_failed.items() if n}},
            "rows": rows}
-    fp.write_text(json.dumps(out), encoding="utf-8")
+    # Do NOT cache a short read: the cache is what every later answer counts from, so a partial
+    # model must be retried next time rather than frozen. The rows are still returned (labelled
+    # by `coverage.nodes_failed`) so the caller can see what happened.
+    if n_failed:
+        out["cache_skipped"] = ("a node failed to read; this result was not cached — call again "
+                                "(or with refresh=True) to retry the missing nodes")
+    else:
+        fp.write_text(json.dumps(out), encoding="utf-8")
     return out
 
 
@@ -2589,10 +2677,17 @@ def bim_elements(source: str, where: str = "", limit: int = 20,
         return json.dumps({"service": d["service"], "matched": len(hits),
                            "group_by": group_by, "rows": [{"value": k, "count": v} for k, v in pairs],
                            "note": BIM_NOTE}, ensure_ascii=False)
-    slim = [{k: r.get(k) for k in ("id", "Category", "Family", "FamilyType", "BldgLevel", "Mark",
-                                   "sublayer", "lon", "lat")} for r in hits[:max(1, limit)]]
+    slim = [{"uid": r.get("uid"), "id": r.get("id"), "Category": r.get("Category"),
+             "Family": r.get("Family"), "FamilyType": r.get("FamilyType"),
+             "BldgLevel": r.get("BldgLevel"), "Mark": r.get("Mark"),
+             "sublayer": r.get("sublayer"), "lon": r.get("lon"), "lat": r.get("lat")}
+            for r in hits[:max(1, limit)]]
     return json.dumps({"service": d["service"], "matched": len(hits), "returned": len(slim),
-                       "rows": slim, "note": BIM_NOTE}, ensure_ascii=False)
+                       "rows": slim,
+                       "note": BIM_NOTE + " uid = sublayer/node:id — i3s ids restart both inside a "
+                                          "node and across sublayers, so quote uid (not id) when "
+                                          "you need one element.",
+                       }, ensure_ascii=False)
 
 
 def site_zoning(lat: float = 0.0, lon: float = 0.0, source: str = "", radius_m: int = 0) -> str:
@@ -3053,6 +3148,851 @@ def publish_findings(source: str, title: str = "BIM Audit Findings", refresh: bo
     return json.dumps(out, ensure_ascii=False)
 
 
+# ---------------------------------------------------------------- interactive BIM viewer
+#
+# What actually filters a Building Scene Layer, measured in Chromium against a hosted BSL
+# (Maps SDK 5.0, 2026-11-04) — the three obvious mechanisms do NOT behave alike:
+#
+#   sublayer.visible               WORKS  — the only reliable way to isolate a Category
+#   BuildingFilter expression      WORKS  — BldgLevel / Discipline / Category change what draws
+#   sublayer.definitionExpression  NO EFFECT (0.0% pixel change) — never rely on it
+#   sublayer.queryFeatures         throws 'query-not-available' unless the layer has an
+#                                  associated feature layer, so element geometry cannot be
+#                                  read from the browser at all: positions come from the
+#                                  i3s cache via _bim_rows() instead
+#
+# Per-instance isolation is not something i3s filters offer: a filter selects a floor, a
+# discipline or a category, never a single wall. "Select this element" therefore means fly
+# the camera to its cached position + mark it + narrow the drawing to its category and
+# level, and the tool says so instead of implying the one element was isolated.
+
+_LIVE_V = 1
+
+
+def _live_slug(service: str) -> str:
+    return hashlib.md5(("live|" + service).encode()).hexdigest()[:10]
+
+
+def _live_path(service: str):
+    return WORK / "live" / f"{_live_slug(service)}.json"
+
+
+def _live_read(service: str) -> dict:
+    fp = _live_path(service)
+    if fp.exists():
+        try:
+            d = json.loads(fp.read_text(encoding="utf-8"))
+            if d.get("v") == _LIVE_V:
+                return d
+        except (OSError, ValueError):
+            pass
+    return {"v": _LIVE_V, "rev": 0}
+
+
+def _live_update(service: str, mutate) -> dict:
+    """Patch the shared viewer state and bump rev so the open page re-applies exactly once."""
+    st = _live_read(service)
+    st["v"] = _LIVE_V
+    st["service"] = service          # so a viewer handle can be resolved back to its source
+    st["rev"] = int(st.get("rev") or 0) + 1
+    st["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    mutate(st)
+    _save(_live_path(service), json.dumps(st, ensure_ascii=False))
+    return st
+
+
+def _q(v: str) -> str:
+    """Quote a value for a filter expression (single quotes, doubled inside)."""
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def _num_list(v) -> list:
+    """ids as a list — accepts a real list, a JSON array, or 'a, b, c'."""
+    if isinstance(v, (list, tuple)):
+        raw = list(v)
+    else:
+        s = str(v or "").strip()
+        if not s:
+            return []
+        if s.startswith("["):
+            try:
+                got = json.loads(s)
+                raw = list(got) if isinstance(got, list) else [got]
+            except ValueError:
+                raw = [p for p in s.strip("[]").split(",")]
+        else:
+            raw = s.split(",")
+    out = []
+    for x in raw:
+        t = str(x).strip().strip("'\"")
+        if not t:
+            continue
+        try:
+            out.append(int(float(t)))
+        except ValueError:
+            out.append(t)
+    return out
+
+
+def _bim_catalog(rows: list) -> dict:
+    """Floors, categories and disciplines as the viewer can actually filter them."""
+    lv, cat, disc = {}, {}, {}
+    for r in rows:
+        k = r.get("BldgLevel_Desc") or r.get("BldgLevel")
+        if k is not None and str(k) != "":
+            # i3s writes -2147483648 for "no level"; it is not a storey and cannot be chosen
+            if str(k).strip() == "-2147483648":
+                continue
+            lv[str(k)] = lv.get(str(k), 0) + 1
+        s = r.get("sublayer")
+        if s:
+            cat[str(s)] = cat.get(str(s), 0) + 1
+        d = r.get("Discipline")
+        if d:
+            disc[str(d)] = disc.get(str(d), 0) + 1
+
+    def num(k):
+        try:
+            return (0, float(k))
+        except ValueError:
+            return (1, 0.0)
+
+    levels = [{"level": k, "elements": v} for k, v in sorted(lv.items(), key=lambda t: num(t[0]))]
+    return {
+        "levels": levels,
+        "categories": [{"name": k, "elements": v} for k, v in sorted(cat.items(), key=lambda t: -t[1])],
+        "disciplines": [{"name": k, "elements": v} for k, v in sorted(disc.items(), key=lambda t: -t[1])],
+    }
+
+
+def _bim_expr(floors, disciplines) -> str:
+    """BuildingFilter expression for floors and/or disciplines (categories use visibility)."""
+    parts = []
+    fl = [str(f).strip() for f in _num_list(floors) if str(f).strip()]
+    if fl:
+        vals = []
+        for f in fl:
+            vals.append(f if re.fullmatch(r"-?\d+(\.\d+)?", f) else _q(f))
+        parts.append("BldgLevel IN (" + ", ".join(vals) + ")")
+    dd = [str(d).strip() for d in (_num_list(disciplines) if not isinstance(disciplines, str)
+                                  else [x for x in disciplines.split(",")]) if str(d).strip()]
+    if dd:
+        parts.append("Discipline IN (" + ", ".join(_q(d) for d in dd) + ")")
+    return " AND ".join(parts)
+
+
+def _bbox_of(rows):
+    """Extent of the element positions — where the model actually is.
+
+    These are per-NODE anchors: one node's 241 features all carry the same `position`, so
+    this is the extent of the anchors, not a spread of individual elements. That is enough
+    to frame the building (browser-measured: the drawn model's ground pad lands at this
+    bbox's centre, and the layer's own fullExtent contains it).
+
+    Do NOT swap this for the service's declared fullExtent: on the ZCB layer that document
+    reported a rectangle ~200 m from the geometry, and the SDK's fullExtent only converges
+    on the right place after every tile has streamed in.
+    """
+    lons = [r["lon"] for r in rows if r.get("lon") is not None]
+    lats = [r["lat"] for r in rows if r.get("lat") is not None]
+    if not lons:
+        return None
+    return [round(min(lons), 7), round(min(lats), 7), round(max(lons), 7), round(max(lats), 7)]
+
+
+def _viewer_url(service: str, page: str) -> str:
+    base = (PUBLIC + "/" if PUBLIC else f"http://localhost:{PORT}/")
+    return base + page
+
+
+def bim_viewer(source: str, title: str = "", overlay: str = "", refresh: bool = False) -> str:
+    """Open the interactive BIM viewer for a building model: floor filter, category and
+    discipline toggles, zoom/home controls, click-a-component attributes.
+
+    Use it FIRST, then drive it with bim_filter() and bim_select() — those return the same
+    `viewer` handle and the open page updates live, no refresh. overlay: comma-separated CSDI
+    dataset ids to draw under the model (e.g. lots, registered slopes) for spatial context.
+    source: SceneServer url or AGOL item id (scene service or Scene Package .slpk)."""
+    d = _bim_rows(source, refresh)
+    service = d["service"]
+    rows = d["rows"]
+    cat = _bim_catalog(rows)
+    ov = []
+    for did in _num_list(overlay) if overlay else []:
+        p = WORK / "data" / f"{re.sub(r'[^A-Za-z0-9_.-]', '_', str(did))}.geojson"
+        if not p.exists():
+            r = json.loads(load_hk_data(str(did)))
+            if r.get("error"):
+                continue
+            p = pathlib.Path(r["file"])
+        lab = p.with_suffix(".name")
+        ov.append({"id": str(did), "name": lab.read_text(encoding="utf-8") if lab.exists() else str(did),
+                   "url": f"data/{p.name}"})
+    slug = _live_slug(service)
+    st = _live_read(service)
+    page = f"bim-{slug}.html"
+    bbox = _bbox_of(rows)
+    if bbox:  # initial camera: the element-position extent, where the model draws
+        _save(WORK / "live" / f"{slug}-bbox.json", json.dumps(bbox))
+    tok_viewer, note = _viewer_service_auth("" if service.startswith("slpk://") else service)
+    token_js = ""
+    if tok_viewer:
+        token_js = (f'idMgr.registerToken({{ server: "https://www.arcgis.com", '
+                    f'token: "{tok_viewer}" }});')
+    html = (_BIM_VIEWER
+            .replace("/*%TITLE%*/", json.dumps(title or _service_tag(service), ensure_ascii=False)
+                     .replace("</", "<\\/"))
+            .replace("/*%SERVICE%*/", json.dumps("" if service.startswith("slpk://") else service))
+            .replace("/*%SLUG%*/", json.dumps(slug))
+            .replace("/*%TOKENJS%*/", token_js)
+            .replace("/*%OVERLAY%*/", json.dumps(ov, ensure_ascii=False))
+            .replace("/*%CATALOG%*/", json.dumps(cat, ensure_ascii=False)))
+    WORK.mkdir(parents=True, exist_ok=True)
+    (WORK / page).write_text(html, encoding="utf-8")
+    # register the handle -> service mapping before any state tool needs it
+    if not st.get("service"):
+        _live_update(service, lambda s: None)
+    _serve()
+    out = {
+        "viewer": slug,
+        "url": _viewer_url(service, page),
+        "service": service,
+        "sublayers": d.get("sublayers"),
+        "elements": len(rows),
+        "levels": cat["levels"],
+        "categories": cat["categories"][:40],
+        "disciplines": cat["disciplines"],
+        "overlay": [o["id"] for o in ov],
+        "state_rev": st.get("rev", 0),
+        "next": "bim_filter(viewer, floors='5') or bim_select(viewer, ids=[...]) — the open page "
+                "updates live, no refresh needed",
+        "note": BIM_NOTE + " 只有 hosted scene layer 可以喺瀏覽器畫；Scene Package 只可做 "
+                           "attributes。",
+    }
+    if note:
+        out["viewer_note"] = note
+    if service.startswith("slpk://"):
+        out["warning"] = ("a Scene Package has no hosted layer for the browser to draw — the "
+                          "viewer shows the element positions only; filters have nothing to act on")
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _resolve_viewer(source: str) -> str:
+    """The `viewer` handle from bim_viewer is a slug; a source/deeplink is also accepted.
+
+    A slug is looked up in the live state directory (every viewer writes its own service url
+    there), so the caller can keep using the short handle instead of pasting a long url.
+    """
+    s = str(source or "").strip()
+    if s.startswith(("http", "slpk://")):
+        return _bim_service(s)
+    if re.fullmatch(r"[0-9a-fA-F]{10}", s):          # a live slug, not an AGOL item id
+        for fp in (WORK / "live").glob("*.json"):
+            if fp.stem == s:
+                try:
+                    d = json.loads(fp.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    break
+                if d.get("service"):
+                    return d["service"]
+        raise ValueError(f"unknown viewer handle {s!r} — call bim_viewer() to create one")
+    if re.fullmatch(r"[0-9a-fA-F]{32}", s):
+        return _bim_service(s)
+    raise ValueError("pass the viewer handle from bim_viewer(), or a SceneServer url / item id")
+
+
+def bim_filter(source: str = "", floors="", categories="", disciplines="", clear: bool = False,
+               tilt: float = 0, heading: float = 0) -> str:
+    """Filter the live BIM viewer: show only these floors / categories / disciplines.
+
+    floors: '5' | '3,4,5' | 'G,1,2' — one or many BldgLevel values (numeric or text).
+    categories: sublayer names such as 'Walls,Doors' (see bim_viewer().categories).
+    disciplines: 'Architectural' etc. Categories are applied as sublayer visibility, floors
+    and disciplines as a real BuildingFilter expression — that split is what the SDK honours.
+    clear=True resets everything back to the whole model.
+    source: the viewer handle from bim_viewer()."""
+    service = _resolve_viewer(source)
+    d = _bim_rows(service)
+    rows = d["rows"]
+    cat = _bim_catalog(rows)
+    if clear:
+        st = _live_update(service, lambda s: (s.pop("filter", None), s.pop("hidden", None)))
+        return json.dumps({"viewer": _live_slug(service), "filter": None, "cleared": True,
+                           "state_rev": st["rev"]}, ensure_ascii=False)
+
+    expr = _bim_expr(floors, disciplines)
+    names = [c["name"] for c in cat["categories"]]
+    want = [c.strip() for c in (categories.split(",") if isinstance(categories, str)
+                               else list(categories or [])) if str(c).strip()]
+    unknown = [w for w in want if w.lower() not in {n.lower() for n in names}]
+    if unknown:
+        return json.dumps({"error": f"no such category: {', '.join(unknown)}",
+                           "categories": names[:40],
+                           "hint": "pass a sublayer name exactly as bim_viewer() lists it"},
+                          ensure_ascii=False)
+    keep = {n.lower() for n in want}
+    hidden = [n for n in names if keep and n.lower() not in keep]
+
+    # how many elements the drawn subset holds — counted from cache, so it is a real number
+    pred, _used, werr = _build_where(expr) if expr else (None, set(), None)
+    if werr:
+        return json.dumps({**werr, "tool": "bim_filter"}, ensure_ascii=False)
+    shown = [r for r in rows
+             if (pred is None or pred(r)) and (not hidden or str(r.get("sublayer")) not in hidden)]
+
+    def mutate(s):
+        s["filter"] = {"expression": expr, "floors": _num_list(floors) if floors else [],
+                       "categories": want, "disciplines": _num_list(disciplines) if disciplines else []}
+        s["hidden"] = hidden
+        if tilt or heading:
+            s["view"] = {"tilt": float(tilt or 62), "heading": float(heading or 20)}
+
+    st = _live_update(service, mutate)
+    out = {
+        "viewer": _live_slug(service),
+        "expression": expr or "(none — visibility only)",
+        "hidden_categories": hidden,
+        "elements_shown": len(shown),
+        "elements_total": len(rows),
+        "state_rev": st["rev"],
+        "next": "bim_select(viewer, where=...) to fly to what is left" if shown else
+                "nothing matches — check bim_viewer().levels",
+    }
+    if not shown:
+        out["warning"] = "this filter draws nothing; the model will look empty"
+    return json.dumps(out, ensure_ascii=False)
+
+
+def bim_select(source: str = "", ids="", uids="", where: str = "", isolate: bool = True,
+               ghost: bool = True, tilt: float = 62, heading: float = 20,
+               refresh: bool = False) -> str:
+    """Fly the camera to specific BIM elements and mark them on the live viewer.
+
+    uids: 'uid' values from bim_elements() — 'Walls/3:41,Pipes/0:9' or a list. This is the exact
+    way to name an element: i3s ids restart both inside a node and across sublayers, so `ids`
+    can match several elements.
+    ids: bare feature ids — accepted for convenience, but it selects every element that shares
+    the id (the reply reports how many, so a wrong guess is visible rather than silent).
+    where: instead of ids, any bim_elements() expression ('Category=door AND BldgLevel=10').
+    isolate: narrow the drawing to those elements' categories and levels, so the selection is
+    not buried in the whole model.
+    ghost: when isolating, draw the rest of the building as a wire-frame outline rather than
+    hiding it — the selection stays solid and the building still reads as a building. This is
+    how one element is shown in context; i3s still cannot hide every other instance.
+    source: the viewer handle from bim_viewer()."""
+    service = _resolve_viewer(source)
+    d = _bim_rows(service, refresh)
+    rows = d["rows"]
+    want = set(_num_list(ids))
+    want_uid = {str(u).strip() for u in (_num_list(uids) if not isinstance(uids, str)
+                                        else uids.split(",")) if str(u).strip()}
+    pred = None
+    _used = set()
+    if where:
+        pred, _used, werr = _build_where(where)
+        if werr:
+            return json.dumps({**werr, "tool": "bim_select"}, ensure_ascii=False)
+    if not want and not want_uid and pred is None:
+        raise ValueError("pass uids= (exact), ids=, or where= — nothing to select")
+    hits = [r for r in rows
+            if (not want and not want_uid or r.get("id") in want or str(r.get("uid")) in want_uid)
+            and (pred is None or pred(r))]
+    known_ids = {r.get("id") for r in rows}
+    known_uids = {str(r.get("uid")) for r in rows}
+    missing = sorted(str(i) for i in want - known_ids)
+    missing_uid = sorted(u for u in want_uid - known_uids)
+    if not hits:
+        hint = _zero_hint(rows, _used, d["fields"]) if where else {}
+        return json.dumps({"viewer": _live_slug(service), "matched": 0,
+                           **({"unknown_ids": missing[:20]} if missing else {}),
+                           **({"unknown_uids": missing_uid[:20]} if missing_uid else {}),
+                           **hint,
+                           "hint": "uids come from bim_elements() rows",
+                           }, ensure_ascii=False)
+    # Aim at the hits' own positions: those are where the elements draw.
+    bbox = _bbox_of(hits)
+    frame = bbox
+    pts = [{"lon": round(r["lon"], 7), "lat": round(r["lat"], 7)} for r in hits[:400]
+           if r.get("lon") is not None]
+    cats = sorted({str(r.get("sublayer")) for r in hits if r.get("sublayer")})
+    levels = sorted({str(r.get("BldgLevel_Desc") or r.get("BldgLevel")) for r in hits},
+                    key=lambda k: (0, float(k)) if re.fullmatch(r"-?\d+(\.\d+)?", k) else (1, 0))
+    label = hits[0].get("FamilyType") or hits[0].get("Category") or f"{len(hits)} elements"
+    # Where the camera should aim vertically. `BldgLevel_Elev` is the storey height in metres,
+    # and it is the difference between framing "the building" and framing the element: aiming a
+    # storey-10 door at ground level left it ~77 px low in a 800 px view, surrounded by car park.
+    # `math.isfinite` is not optional — unset levels carry NaN, isinstance(nan, float) is True,
+    # and one NaN poisons the whole mean into `NaN`, which json.dumps writes raw and JSON.parse
+    # in the page rejects, silently dropping the entire state update.
+    elevs = [h.get("BldgLevel_Elev") for h in hits
+             if isinstance(h.get("BldgLevel_Elev"), (int, float))
+             and math.isfinite(h.get("BldgLevel_Elev"))]
+    aim_z = round(sum(elevs) / len(elevs) + 1.5, 1) if elevs else 12.0
+    # Ghosting answers "where is this inside the building", so the camera frames the BUILDING
+    # and the selection reads as a highlight within it. Aiming at the hits alone would zoom to a
+    # zero-span box — one door — and put the eye inside the roof (measured: the whole viewport
+    # filled with a door panel, context lost). Without ghosting, isolate is the opposite promise:
+    # fly right up to the element.
+    want_ghost = bool(ghost) and len(hits) <= GHOST_MAX_HITS
+    if want_ghost:
+        model_box = _bbox_of(rows)
+        if model_box:
+            frame = model_box
+            aim_z = round(max(aim_z, 6.0), 1)
+    # The same card the page renders — returned too, so the agent can name the element it just
+    # flew to instead of describing it as "the selection". `uid` is in it on purpose: it is the
+    # token to quote back in a later bim_select() or in the answer.
+    record = {"uid": hits[0].get("uid"), "id": hits[0].get("id"),
+              **{k: hits[0].get(k) for k in
+                 ("Category", "Family", "FamilyType", "ElementType",
+                  "Discipline", "BldgLevel", "BldgLevel_Desc", "Mark")}}
+
+    def mutate(s):
+        s["selection"] = {"ids": [r.get("id") for r in hits[:400]], "points": pts,
+                          "label": str(label), "count": len(hits), "record": record}
+        s["camera"] = {"bbox": frame, "tighten": bbox, "tilt": float(tilt),
+                       "heading": float(heading), "aim_z": aim_z,
+                       "seq": int((s.get("camera") or {}).get("seq") or 0) + 1}
+        if isolate:
+            names = [c["name"] for c in _bim_catalog(rows)["categories"]]
+            expr = _bim_expr(levels, [])
+            # ghosting needs a single block that can be ghosted, so the target expression has
+            # to include the category itself — the reply's separate `hidden` visibility switch
+            # is NOT used here (see the note in _BIM_VIEWER: ExteriorShell would stay visible
+            # and cover the ghost).
+            if ghost and len(hits) <= GHOST_MAX_HITS:
+                # Filter by the Category ATTRIBUTE, not by sublayer name: the attribute holds
+                # lowercase revit values ('door') while the sublayer is called 'Doors', and a
+                # bare quoted string ('Doors') is not a valid predicate — it silently matched
+                # every element, so the solid block covered the whole building and the ghost
+                # never showed. Difference measured on ZCB.
+                vals = sorted({str(r.get("Category")) for r in hits if r.get("Category")})
+                cats_expr = ("Category IN (" + ", ".join(_q(v) for v in vals) + ")"
+                             if vals else "")
+                expr = " AND ".join(x for x in (expr, cats_expr) if x) or "1=1"
+                s.pop("hidden", None)
+                s["ghost"] = True
+            else:
+                s["hidden"] = [n for n in names if n not in cats]
+                s.pop("ghost", None)
+            s["filter"] = {"expression": expr, "floors": levels,
+                           "categories": cats, "disciplines": []}
+
+    st = _live_update(service, mutate)
+    out = {
+        "viewer": _live_slug(service),
+        "matched": len(hits),
+        "uids": [r.get("uid") for r in hits[:20]],
+        "ids": [r.get("id") for r in hits[:20]],
+        "record": record,
+        "bbox": bbox,
+        "camera_bbox": frame,
+        "camera": {"tilt": float(tilt), "heading": float(heading), "aim_z": aim_z},
+        "isolated_to": {"categories": cats, "levels": levels} if isolate else None,
+        "ghost": bool(isolate and ghost and len(hits) <= GHOST_MAX_HITS),
+        "state_rev": st["rev"],
+        "accuracy": ("the camera centres on the selected elements' own positions, at the "
+                     "service's own scale; the drawing is narrowed by category and level — "
+                     "i3s cannot hide every other instance" +
+                     (", so the rest of the building is ghosted to a wire-frame outline"
+                      if isolate and ghost and len(hits) <= GHOST_MAX_HITS else "")),
+    }
+    if len(hits) > 1:
+        out["record_note"] = f"`record` describes the first of {len(hits)} matches ({record['uid']})"
+    if missing:
+        out["unknown_ids"] = missing[:20]
+    if hits[0].get("lon") is None:
+        out["warning"] = "selected rows carry no position — the camera has nothing to aim at"
+    return json.dumps(out, ensure_ascii=False)
+
+
+def bim_clear(source: str = "") -> str:
+    """Reset the live BIM viewer: whole model, no selection, no highlight. source: viewer handle."""
+    service = _resolve_viewer(source)
+    st = _live_update(service, lambda s: (s.pop("filter", None), s.pop("hidden", None),
+                                          s.pop("selection", None), s.pop("camera", None)))
+    return json.dumps({"viewer": _live_slug(service), "cleared": True, "state_rev": st["rev"]},
+                      ensure_ascii=False)
+
+
+_BIM_VIEWER = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>BIM Viewer — hk-spatial</title>
+<link rel="icon" href="data:," />
+<link rel="stylesheet" href="https://js.arcgis.com/5.0/@arcgis/core/assets/esri/themes/light/main.css" />
+<style>
+  :root{--glass:rgba(255,255,255,.94);--line:#d7dee8;--fg:#101828;--dim:#5b6b82;--accent:#0b6bcb}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font:13px/1.45 ui-sans-serif,-apple-system,"Segoe UI","PingFang HK","Microsoft JhengHei",sans-serif;color:var(--fg)}
+  #view{position:absolute;inset:0}
+  #panel{position:absolute;top:14px;left:14px;z-index:10;width:262px;max-height:calc(100% - 28px);overflow:auto;
+    background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:12px 13px;
+    box-shadow:0 10px 30px rgba(16,24,40,.16)}
+  h1{margin:0 0 3px;font-size:13.5px;font-weight:650}
+  .sub{color:var(--dim);font-size:10.5px;margin-bottom:10px}
+  .sec{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin:12px 0 6px;
+    padding-top:9px;border-top:1px solid var(--line)}
+  .sec:first-of-type{border-top:0;padding-top:0;margin-top:0}
+  .chips{display:flex;flex-wrap:wrap;gap:5px}
+  .chip{border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 8px;font-size:11.5px;
+    cursor:pointer;font-variant-numeric:tabular-nums;color:var(--fg)}
+  .chip:hover{border-color:var(--accent);color:var(--accent)}
+  .chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+  .chip .n{opacity:.62;margin-left:4px;font-size:10px}
+  .row{display:flex;align-items:center;gap:7px;padding:2px 0;font-size:12px}
+  .row input{accent-color:var(--accent);margin:0}
+  .row label{flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .n{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
+  .foot{margin-top:11px;padding-top:8px;border-top:1px solid var(--line);color:var(--dim);font-size:10px}
+  #sel{position:absolute;left:14px;bottom:14px;z-index:10;width:320px;max-height:40vh;overflow:auto;
+    background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:11px 13px;
+    box-shadow:0 10px 30px rgba(16,24,40,.16)}
+  #sel[hidden]{display:none}
+  #sel .ih{font-weight:640;font-size:12.5px;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  #sel .ir{display:flex;gap:9px;padding:2px 0}
+  #sel .ik{flex:0 0 44%;color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+  #sel .iv{flex:1;font-size:11.5px;word-break:break-word}
+  #msg{position:absolute;right:14px;bottom:34px;z-index:10;background:rgba(16,24,40,.86);color:#fff;
+    padding:5px 10px;border-radius:8px;font-size:11px;max-width:44vw}
+  #msg[hidden]{display:none}
+  .esri-ui .esri-attribution{font-size:10px!important}
+</style></head><body>
+<div id="view"></div>
+<div id="panel">
+  <h1 id="ttl"></h1>
+  <div class="sub">Building Scene Layer · <span id="mode">loading…</span></div>
+  <div class="sec">Floor</div><div class="chips" id="floors"></div>
+  <div class="sec">Category</div><div id="cats"></div>
+  <div class="sec">Discipline</div><div class="chips" id="discs"></div>
+  <div class="foot" id="foot">Data: your scene service · Basemap: Esri · Powered by Esri</div>
+</div>
+<div id="sel" hidden></div>
+<div id="msg" hidden></div>
+<script type="module">
+import Map from "https://js.arcgis.com/5.0/@arcgis/core/Map.js";
+import SceneView from "https://js.arcgis.com/5.0/@arcgis/core/views/SceneView.js";
+import BuildingSceneLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/BuildingSceneLayer.js";
+import BuildingFilter from "https://js.arcgis.com/5.0/@arcgis/core/layers/support/BuildingFilter.js";
+import BuildingFilterBlock from "https://js.arcgis.com/5.0/@arcgis/core/layers/support/BuildingFilterBlock.js";
+import GeoJSONLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/GeoJSONLayer.js";
+import GraphicsLayer from "https://js.arcgis.com/5.0/@arcgis/core/layers/GraphicsLayer.js";
+import Graphic from "https://js.arcgis.com/5.0/@arcgis/core/Graphic.js";
+import Camera from "https://js.arcgis.com/5.0/@arcgis/core/Camera.js";
+import Point from "https://js.arcgis.com/5.0/@arcgis/core/geometry/Point.js";
+import Zoom from "https://js.arcgis.com/5.0/@arcgis/core/widgets/Zoom.js";
+import Home from "https://js.arcgis.com/5.0/@arcgis/core/widgets/Home.js";
+import Compass from "https://js.arcgis.com/5.0/@arcgis/core/widgets/Compass.js";
+import ScaleBar from "https://js.arcgis.com/5.0/@arcgis/core/widgets/ScaleBar.js";
+import Legend from "https://js.arcgis.com/5.0/@arcgis/core/widgets/Legend.js";
+import Expand from "https://js.arcgis.com/5.0/@arcgis/core/widgets/Expand.js";
+import identityManager from "https://js.arcgis.com/5.0/@arcgis/core/identity/IdentityManager.js";
+
+const TITLE = /*%TITLE%*/;
+const SERVICE = /*%SERVICE%*/;
+const SLUG = /*%SLUG%*/;
+const OVERLAY = /*%OVERLAY%*/;
+const CATALOG = /*%CATALOG%*/;
+const STATE_URL = "live/" + SLUG + ".json";
+
+document.getElementById("ttl").textContent = TITLE;
+document.title = TITLE + " — BIM Viewer";
+const msg = document.getElementById("msg");
+const say = (t) => { msg.textContent = t; msg.hidden = !t; };
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/*%TOKENJS%*/
+
+const selLayer = new GraphicsLayer({ title: "Selection" });
+const map = new Map({ basemap: "satellite", ground: "world-elevation", layers: [selLayer] });
+const view = new SceneView({ container: "view", map,
+  camera: { position: { longitude: 114.1694, latitude: 22.3193, z: 1200 }, tilt: 60, heading: 20 } });
+  view.highlightOptions = { color: [0, 200, 255], haloColor: [0, 200, 255],
+                            haloOpacity: 0.9, fillOpacity: 0.15 };
+window.__view = view;
+const sleep2 = sleep;
+
+let bim = null;
+async function loadModel() {
+  if (!SERVICE) { document.getElementById("mode").textContent = "Scene Package — positions only"; return; }
+  bim = new BuildingSceneLayer({ url: SERVICE, title: TITLE });
+  map.add(bim, 0);
+  try { await bim.load(); } catch (e) {
+    const alt = new GeoJSONLayer({ url: "about:blank" });
+    document.getElementById("mode").textContent = "load failed: " + String(e).slice(0, 60);
+    say("模型載入失敗 · model did not load");
+    return;
+  }
+  // a Building layer ships its root group INVISIBLE — the SDK honours that and draws nothing
+  (function show(list) {
+    (list || []).forEach(s => {
+      try { s.visible = true; } catch (e) {}
+      if (s.sublayers) show(s.sublayers);
+    });
+  })(bim.sublayers);
+  const n = [];
+  (function walk(list) {
+    (list || []).forEach(s => {
+      if (s.sublayers && s.sublayers.length) walk(s.sublayers);
+      else n.push(s);
+    });
+  })(bim.sublayers);
+  document.getElementById("mode").textContent = n.length + " components";
+  window.__layerKind = "BuildingSceneLayer";
+  window.__bim = bim;                      // debugging handle, same as window.__view
+  window.__leafCount = n.length;
+  await view.when();
+  // Report the drawn state: a BSL that loaded but shows nothing is the failure mode worth
+  // seeing, and it is invisible from the tool side — only the browser can answer this.
+  window.__draw = { loaded: bim.loaded, leaves: n.length,
+                    visibleLeaves: n.filter(s => s.visible).length,
+                    fullExtent: bim.fullExtent ? [bim.fullExtent.xmin, bim.fullExtent.ymin,
+                                                  bim.fullExtent.xmax, bim.fullExtent.ymax] : null };
+}
+
+// ---- widgets (Zoom is the arcgis-zoom equivalent for a programmatic view) ----
+view.ui.add(new Zoom({ view }), "bottom-right");
+view.ui.add(new Home({ view, viewpoint: null }), "bottom-right");
+view.ui.add(new Compass({ view }), "bottom-right");
+view.ui.add(new ScaleBar({ view, unit: "metric" }), "bottom-left");
+const legend = new Expand({ view, content: new Legend({ view }), expanded: false,
+  expandTooltip: "Legend" });
+view.ui.add(legend, "top-right");
+
+// ---- panel: floor chips, category checkboxes, discipline chips --------------------
+// The catalogue comes from the Python side (element counts per level/category), so the
+// panel lists only what the model actually contains — no guessing at IFC names.
+const picked = { floors: new Set(), cats: new Set(), discs: new Set() };
+function chip(text, active, onclick, title) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "chip" + (active ? " on" : "");
+  b.textContent = text; if (title) b.title = title;
+  b.onclick = () => { onclick(b); };
+  return b;
+}
+function buildPanel() {
+  const fl = document.getElementById("floors");
+  const ca = document.getElementById("cats");
+  const di = document.getElementById("discs");
+  (CATALOG.levels || []).forEach(l => {
+    fl.appendChild(chip(String(l.level), false, (b) => {
+      picked.floors.has(l.level) ? picked.floors.delete(l.level) : picked.floors.add(l.level);
+      b.classList.toggle("on");
+    }, l.elements + " elements on level " + l.level));
+  });
+  (CATALOG.categories || []).forEach(c => {
+    const row = document.createElement("label");
+    row.className = "row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = true;
+    cb.onchange = () => { cb.checked ? picked.cats.delete(c.name) : picked.cats.add(c.name); };
+    const sp = document.createElement("label");
+    sp.textContent = c.name;
+    const cnt = document.createElement("span");
+    cnt.className = "n"; cnt.textContent = c.elements;
+    row.append(cb, sp, cnt); ca.appendChild(row);
+  });
+  (CATALOG.disciplines || []).forEach(d => {
+    di.appendChild(chip(d.name, false, (b) => {
+      picked.discs.has(d.name) ? picked.discs.delete(d.name) : picked.discs.add(d.name);
+      b.classList.toggle("on");
+    }, d.elements + " elements"));
+  });
+}
+buildPanel();
+
+// ---- filter plumbing -------------------------------------------------------------
+// floors + disciplines -> BuildingFilter expression (the only thing the SDK honours)
+// categories          -> sublayer.visible (definitionExpression has NO effect, measured)
+// ghost               -> a second block '1=1' in wire-frame, so everything NOT selected
+//                        draws as an outline instead of disappearing. This is how a single
+//                        element can stay readable inside the whole building: i3s cannot hide
+//                        every other instance, but it CAN ghost them. Measured in a browser —
+//                        'wire-frame' and 'x-ray' are hyphenated (the class is
+//                        BuildingFilterModeWireFrame); bare 'wireframe'/'xray' throw inside the
+//                        SDK with "Cannot read properties of null (reading 'type')".
+let filterUid = 0;
+async function applyFilter(st) {
+  const f = st && st.filter ? st.filter : null;
+  const hidden = new Set((st && st.hidden) || []);
+  const ghost = !!(st && st.ghost);
+  const leaves2 = [];
+  (function walk(list) {
+    (list || []).forEach(s => {
+      if (s.sublayers && s.sublayers.length) walk(s.sublayers);
+      else leaves2.push(s);
+    });
+  })(bim ? bim.sublayers : null);
+  leaves2.forEach(s => { try { s.visible = !hidden.has(s.title); } catch (e) {} });
+  if (!bim) return;
+  if (f && f.expression) {
+    const blocks = [new BuildingFilterBlock({
+      title: "selection", filterExpression: f.expression, filterMode: { type: "solid" },
+    })];
+    if (ghost) {
+      // Draw the whole building as an outline and let the SOLID block punch through it.
+      // Ghosting must NOT be combined with sublayer.visible: the model has shell sublayers
+      // that are absent from the element catalogue (ExteriorShell, Site, Stairs, ...), so a
+      // hide-by-catalogue list leaves the envelope visible and opaque — measured: the ghost
+      // block applied, nothing looked ghosted, because the shell was still drawn solid.
+      blocks.push(new BuildingFilterBlock({
+        title: "context (ghost)", filterExpression: "1=1", filterMode: { type: "wire-frame" },
+      }));
+    }
+    const bf = new BuildingFilter({ name: "hk-spatial-" + (++filterUid), filterBlocks: blocks });
+    bim.filters.add(bf);
+    bim.activeFilterId = bf.id;
+  } else {
+    bim.activeFilterId = "";
+  }
+}
+
+// ---- camera: frame the element extent ---------------------------------------------
+// The bbox comes from per-node `position` metadata, and browser measurement confirms the
+// model's ground pad draws at exactly that centre — so the bbox, not the layer's
+// declared fullExtent, is the authority. (The fullExtent document was ~200 m off on the
+// ZCB layer, and the SDK's version only converges once every tile has streamed in.)
+// `goTo({center, scale, tilt})` resolved without error but did not move the camera, and a
+// Camera assigned straight at the target leaves it low in frame at tilt — so the eye is
+// placed and then corrected against where toScreen() says the target actually landed.
+const M_PER_DEG_LAT = 110574, M_PER_DEG_LON = 111320;
+async function goToBbox(bbox, tilt, heading, aimZ_) {
+  const t = Number.isFinite(tilt) && tilt > 0 ? tilt : 62;
+  const h = Number.isFinite(heading) ? heading : 20;
+  if (!bbox && !(bim && bim.fullExtent)) return false;
+  let cx, cy, spanM;
+  if (bbox) {
+    cx = (bbox[0] + bbox[2]) / 2; cy = (bbox[1] + bbox[3]) / 2;
+    const cos = Math.cos(cy * Math.PI / 180);
+    spanM = Math.max((bbox[2] - bbox[0]) * M_PER_DEG_LON * cos,
+                     (bbox[3] - bbox[1]) * M_PER_DEG_LAT, 12);
+  } else {
+    const fe = bim.fullExtent;
+    cx = (fe.xmin + fe.xmax) / 2; cy = (fe.ymin + fe.ymax) / 2;
+    const cos = Math.cos(cy * Math.PI / 180);
+    spanM = Math.max((fe.xmax - fe.xmin) * M_PER_DEG_LON * cos,
+                     (fe.ymax - fe.ymin) * M_PER_DEG_LAT, 20);
+  }
+  // Browser-tuned: spanM*1.9+35 overshot (the eye ended up inside the roof), and a pure
+  // spanM*1.15 was too close. This height frames the whole model with margin to orbit.
+  // The 12 m floor above matters: ONE element has a degenerate (zero-span) bbox, and without
+  // it the camera ended up 4 km away, mid-valley, with the building a speck — measured.
+  const z = Math.max(spanM * 1.6 + 70, 90);
+  // The view's centre is the point where the optical axis meets the ground, so with the
+  // camera at height z and tilt t the eye must sit z*tan(t) BEHIND the target along the
+  // heading. Placing the eye exactly there centres the target in one step — an earlier
+  // version assigned the eye AT the target and then tried to correct, which never
+  // converged (measured 172 px still off after four passes).
+  const back = z * Math.tan(t * Math.PI / 180);
+  const cosLat = Math.cos(cy * Math.PI / 180);
+  const eyeLat = cy - (back * Math.cos(h * Math.PI / 180)) / M_PER_DEG_LAT;
+  const eyeLon = cx - (back * Math.sin(h * Math.PI / 180)) / (M_PER_DEG_LON * cosLat);
+  view.camera = new Camera({
+    position: { longitude: eyeLon, latitude: eyeLat, z: z }, tilt: t, heading: h,
+  });
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  // `aimZ` is the height of the thing you want in the middle of the screen. It defaults to
+  // 12 m because that is a sensible mid-height for "the building", but a single storey-10
+  // door lives at ~40 m — aiming at ground level for it left it ~77 px low and, with the eye
+  // at 90 m, framed mostly car park. Pass the element's own level height instead.
+  const aimZ = Number.isFinite(aimZ_) ? aimZ_ : 12;
+  const aim = new Point({ longitude: cx, latitude: cy, z: aimZ, spatialReference: { wkid: 4326 } });
+  let off = null;
+  try { const p = view.toScreen(aim);
+        if (p && Number.isFinite(p.x)) off = [Math.round(p.x - view.width / 2),
+                                             Math.round(p.y - view.height / 2)]; } catch (e) {}
+  window.__framed = { aim: [+cx.toFixed(6), +cy.toFixed(6)], aimZ: aimZ,
+                      eye: [+eyeLon.toFixed(6), +eyeLat.toFixed(6)],
+                      z: Math.round(z), offPx: off };
+  return true;
+}
+window.__goToBbox = goToBbox;
+
+function drawSelection(sel) {
+  selLayer.removeAll();
+  if (!sel || !sel.points) return;
+  sel.points.slice(0, 400).forEach((p, i) => {
+    selLayer.add(new Graphic({
+      geometry: { type: "point", longitude: p.lon, latitude: p.lat, z: 1.5 },
+      symbol: { type: "point-3d", symbolLayers: [
+        { type: "object", resource: { primitive: "sphere" },
+          material: { color: [220, 38, 38, 0.18] }, height: 3.4, width: 3.4, depth: 3.4 },
+        { type: "object", resource: { primitive: "sphere" },
+          material: { color: [220, 38, 38, 0.95] }, height: 1.2, width: 1.2, depth: 1.2 }] },
+      attributes: { n: i + 1 },
+    }));
+  });
+  const box = document.getElementById("sel");
+  const rec = (sel.record || {});
+  const rows = Object.entries(rec).filter(([, v]) => v !== null && v !== "" && v !== undefined)
+    .map(([k, v]) => `<div class="ir"><span class="ik">${k}</span><span class="iv">${v}</span></div>`)
+    .join("");
+  box.innerHTML = `<div class="ih">${sel.count} element${sel.count === 1 ? "" : "s"} · ` +
+    `${sel.label || ""}</div>${rows}`;
+  box.hidden = false;
+}
+
+// ---- the tool <-> page bridge ----------------------------------------------------
+// The MCP tools write live/<slug>.json; the page polls rev and applies whatever changed.
+// Polling (not SSE) keeps the preview server a plain static file server.
+let lastRev = -1, lastCamSeq = -1;
+async function pull() {
+  try {
+    const r = await fetch(STATE_URL + "?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) return;
+    const st = await r.json();
+    if (st.rev === lastRev) return;
+    lastRev = st.rev;
+    if (bim) await applyFilter(st);
+    drawSelection(st.selection);
+    const cam = st.camera;
+    if (cam && cam.seq !== lastCamSeq) {
+      lastCamSeq = cam.seq;
+      await goToBbox(cam.bbox, cam.tilt || 62, cam.heading || 20, cam.aim_z);
+    }
+    window.__state = st;
+  } catch (e) { /* page opened before any tool wrote state */ }
+}
+
+(async () => {
+  await loadModel();
+  await view.when();
+  // frame the model from cached element positions, not the (possibly offset) fullExtent
+  try {
+    const r = await fetch(STATE_URL + "?t=" + Date.now(), { cache: "no-store" });
+    if (r.ok) {
+      const st = await r.json();
+      lastRev = st.rev;
+      window.__state = st;
+      if (bim) await applyFilter(st);
+      drawSelection(st.selection);
+      // A page opened AFTER the tool ran must still honour the camera: recording the seq
+      // without applying it meant "select then open the viewer" silently showed the whole
+      // model (the poller would skip the camera as already-seen). Apply it on load.
+      if (st.camera) { lastCamSeq = st.camera.seq; }
+    }
+  } catch (e) {}
+  const pending = window.__state && window.__state.camera;
+  if (pending) {
+    await goToBbox(pending.bbox, pending.tilt || 62, pending.heading || 20, pending.aim_z);
+  } else if (bim && !(window.__state && window.__state.camera)) {
+    const c = await fetch("live/" + SLUG + "-bbox.json", { cache: "no-store" })
+      .then(r => r.ok ? r.json() : null).catch(() => null);
+    if (c) await goToBbox(c, 62, 20);
+  }
+  // click a component -> its attributes
+  view.on("click", async (ev) => {
+    const hit = (await view.hitTest(ev)).results.find(r => r.graphic && r.graphic.layer === selLayer);
+    if (hit) return;                     // clicked a selection marker: keep the tool's card
+    const box = document.getElementById("sel");
+    box.hidden = true;
+  });
+  window.__ready = true;
+  setInterval(pull, 1200);
+})();
+</script>
+</body></html>"""
+
+
 _SCENE_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>{title}</title>
 <link rel="stylesheet" href="https://js.arcgis.com/4.31/esri/themes/light/main.css">
 <style>
@@ -3436,7 +4376,8 @@ def main():
         from mcp.server.fastmcp import FastMCP as Server
     mcp = Server("hk-spatial")
     bim_tools = (bim_audit, bim_floors, bim_elements, site_zoning, lot_check,
-                 bim_findings, bim_report, publish_findings, publish_scene, webscene_viewer)
+                 bim_findings, bim_report, publish_findings, publish_scene, webscene_viewer,
+                 bim_viewer, bim_filter, bim_select, bim_clear)
     tools = [search_hk_data, load_hk_data, query_hk_data, summarise_hk_data, build_map, build_scene,
              geocode_address, geometry_op, elevation_at, export_static_map, export_static_svg,
              arcgis_request, publish_layer, dataset_status, spatial_join, eo_search, eo_stats]

@@ -629,6 +629,15 @@ The mechanism matters if you extend this. Measured in a browser, not assumed:
 | `BuildingFilter` on `OBJECTID` | **matches ~17 elements, not 1** |
 | `1=1` as `x-ray` (context pass) | **draws nothing** — the solid block goes too; use `wire-frame` |
 | `import .../support/BuildingFilterBlock.js` | **404 on the 4.31 CDN** — there is no such module |
+| a hosted BSL ships its **root groups invisible** | **honoured** — walking `sublayers` and setting `visible = true` is required before anything draws |
+| `hitTest()` on a hosted BuildingSceneLayer | **returns `[]` at every screen point** — even with `include: [layer]` and `includeSublayers: true` |
+| `queryFeatures()` / `queryExtent()` on the root | **throws** — the browser cannot read BSL geometry at all |
+| folding `Category` into the filter expression | **works** — `Category IN ('Walls','Doors')` filters geometry; the sublayer **title** does not match the Revit value (`"PipeFittings"` vs `"Pipe Fittings"`) |
+
+The last three matter for anyone building a component inspector: because `hitTest` returns nothing
+and both query methods throw, **there is no way to pick a single element in the browser**. Drive any
+"click a component" UI from the cached i3s attribute rows instead and say so on screen, rather than
+shipping a click handler that silently does nothing.
 
 `BuildingFilterBlock` is constructible only through the collection: pass **plain object literals** in
 `filterBlocks` and the SDK coerces them (each comes back with
@@ -925,6 +934,71 @@ Chrome over the DevTools protocol and wait real wall-clock seconds instead — N
 `WebSocket`, so no Puppeteer is needed: `Target.createTarget` → `Target.attachToTarget` →
 `Page.navigate` → sleep → `Page.captureScreenshot`. The same caveat applies to `hitTest`, which
 returns empty for BSL geometry even when the model is visibly on screen.
+
+### A bare BuildingSceneLayer needs ~110 s, and mid-flight looks broken
+
+The 30 s figure above is for a plain GeoJSON scene. A full **BuildingSceneLayer** is a different
+order of magnitude: on the 40,283-element Tsim Sha Tsui model, the tower's curtain wall is still
+streaming at 55 s and only resolves around **110 s** at `scale ≈ 430`. Captured at 50–60 s the model
+renders as **bare stacked floor slabs with open edges** — no glazing, no envelope — which reads
+exactly like a geometry or filter bug.
+
+It is not one. Before concluding a BSL is broken, wait past ~110 s. Sampling the same page at 35 s,
+80 s and 120 s gives three very different-looking models from identical code.
+
+### `basemap: "light-gray"` is not a valid id — and fails silently
+
+`Basemap.fromId("light-gray")` returns **`null`** on SDK 5.0, as does `"light-gray-vector"`. `Map`
+then drops the property without an error: `map.basemap === null`, no base layer is created, and the
+ground comes up empty. There is **no console warning**, so it looks like a styling choice rather
+than a bug. The same silent drop hit the 2D tab too.
+
+| style | valid 5.0 id |
+|---|---|
+| Light Gray Canvas | **`gray-vector`** |
+| Streets | `streets-vector` |
+| Topographic | `topo-vector` |
+| Imagery | `satellite` |
+| Dark Gray Canvas | `dark-gray-vector` |
+
+Verify by object, never by eye — `view.map.basemap.baseLayers.getItemAt(0).title` should read
+`"Light Gray Base"`. A `null` basemap still renders a perfectly plausible grey background, which is
+why this survives visual review.
+
+Mixed reports on this are expected: the `build_map` / `build_scene` templates in *this* repository
+are unaffected, because they use `basemap: null` plus an explicit `TileLayer` pointed at a
+`.../MapServer` tile URL, which loads correctly (verified: `tile.loaded = true`, layer view created,
+`zoom 15.6`). The silent-null failure applies to the **string id** path — hand-written viewer pages,
+not the generated ones.
+
+### Default lighting is a sun, and it stains a BIM model
+
+`environment.lighting` defaults to a **date-based sun**. In Hong Kong that throws a warm yellow cast
+that discolours a model's neutral grey and glass materials gold — easy to mistake for a material
+error. Use `lighting: { type: "virtual" }` for even, colour-neutral shading.
+
+Two ordering traps:
+
+- Setting `lighting` in the `SceneView` **constructor is accepted but not honoured for the first
+  frames** — `environment.lighting.type` reads `"virtual"` while the sun still shades the scene.
+- Re-assigning it *after* the BSL exists forces the layer to rebuild its tiles, and the curtain wall
+  drops out for the duration. The reliable order is `await sceneView.when()` → set `lighting` →
+  *then* create and add the building layer, so there is nothing to invalidate.
+
+Also on `environment`: `background` needs an explicit type —
+`{ type: "color", color: "#eef1f6" }`. A bare `{ color: ... }` fails autocast in 5.0 and the
+property is silently discarded.
+
+### Do not put several SceneViews on one page to compare variants
+
+Tempting for A/B checks, and it produces confident, wrong conclusions. Three `SceneView`s on one
+page corrupt each other: every variant reported `zoom 15.38 / scale 13913` — pinned and believable —
+while the *same* code in a single view on its own page reported `zoom 18.59 / scale 1501` and a
+`tilt` of 55°, exactly as asked. Two views, same result; three, same result.
+
+It is not the camera either: `center` + `scale`, an explicit `Camera`, and `goTo({ scale })` all
+work. The tell that the harness is at fault rather than the SDK is a `tilt` near **0** (a top-down
+view you never requested) alongside a scale that ignores every input. Run one variant per page.
 
 The model-facing cost is small by design: a full search → load → build_map flow returns roughly
 2,600 characters of JSON, so the agent does not need long reasoning to produce a map.

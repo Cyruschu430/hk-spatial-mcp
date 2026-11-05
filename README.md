@@ -63,6 +63,8 @@ m.build_scene([res], 'Hong Kong Impounding Reservoirs', 'imagery', tilt=65)"
 - [Installation](#installation)
 - [Prompt cookbook](#prompt-cookbook)
 - [Tool reference](#tool-reference)
+- [Interactive Building Scene Layers](#interactive-building-scene-layers)
+- [Floor filtering when the model is not a Building Scene Layer](#floor-filtering-when-the-model-is-not-a-building-scene-layer)
 - [Configuration](#configuration)
 - [Data source and coverage](#data-source-and-coverage)
 - [Using it without the SDK](#using-it-without-the-sdk-or-inside-your-own-information-system)
@@ -88,6 +90,7 @@ m.build_scene([res], 'Hong Kong Impounding Reservoirs', 'imagery', tilt=65)"
 | **Spatial join** | `spatial_join` counts points inside polygons from two loaded datasets — "which district has the most of these" — with a pure-Python point-in-polygon test, no geometry service. |
 | **Answers, not just maps** | `summarise_hk_data` answers a question in text — counts, sums or averages grouped by any field — and renders a bar chart page. `query_hk_data` returns a few individual rows so a single value can be checked. |
 | **Printable static map** | `export_static_svg` writes a vector map **with the data drawn** — basemap tiles plus the features as real shapes — ready to print to PDF from a browser. |
+| **BIM, driven not just read** | `bim_audit` reads an i3s Building Scene Layer over REST (no `/query`, no `arcgis` package); `bim_viewer` opens a live model with a floor filter, category and discipline toggles, and `bim_filter` / `bim_select` act on that open page — the camera flies to a component named by `uid`, and the number of elements shown is counted, not guessed. |
 | **Earth observation** | `eo_search` finds Sentinel-2 / Landsat / DEM scenes from the Microsoft Planetary Computer STAC catalogue — keyless. `eo_stats` returns monthly NDVI / NDBI / NDMI over a bbox as **statistics**, never a raster, so it is safe on a small machine. |
 | **Geocoding and geometry** | Address ↔ coordinate (both directions), project / buffer / simplify on any GeoJSON geometry, ground elevation, via Esri's public services. No key required. |
 | **Basemaps** | 11 keyless Esri basemap styles (imagery, topographic, streets, light/dark gray, terrain, hillshade, ocean, physical, natgeo, shaded relief) plus an optional labels overlay. |
@@ -323,7 +326,23 @@ account together with their names and item IDs.
 用 hk-spatial 的 arcgis_request 工具，列出我 ArcGIS Online 帳戶中最近五個圖層服務的名稱與項目 ID。
 ```
 
-### 14. Enforce the intended workflow
+### 14. Audit a BIM model and show the finding on the model
+
+```
+Using hk-spatial, audit the ZCB building scene layer, then open the interactive viewer and filter it
+to level 5 — tell me how many elements that leaves. Then select the door with uid "Doors/0:33" and
+fly the camera to it.
+```
+```
+用 hk-spatial 審核 ZCB 建築場景圖層，開啟互動檢視器並篩選到 5 樓，告訴我還剩幾多個構件；
+然後選取 uid 為「Doors/0:33」的門，將鏡頭飛到該處。
+```
+
+The reply should contain a count that matches the filter (`272 of 14,416` for level 5 on ZCB) and a
+`viewer` url. The page is already open by then — filtering and selecting update it in place, with no
+reload and no second url.
+
+### 15. Enforce the intended workflow
 
 Load `SKILL.md` as the agent's skill or system prompt. It constrains the agent to the
 search → load → build_map sequence, prohibits fabricating data, prohibits pasting feature records into
@@ -550,6 +569,192 @@ building is framed on load. Point clouds, Gaussian splats and the scene's basema
 (the satellite basemap stands in). Private scene documents need `ARCGIS_TOKEN`; layers that are
 world-readable need no token at all, which makes this a quick way to look at a shared BIM
 web scene without ArcGIS Pro or a sign-in.
+
+---
+
+## Interactive Building Scene Layers
+
+A BIM question usually ends with "…and show me". These four tools let the agent **act on** an open
+model instead of only describing it. They share one `viewer` handle, and the page polls its state
+file every 1.2 s — so a later call redraws the tab the user is already looking at. No reload, no
+second url, no websocket.
+
+### `bim_viewer(source, title="", overlay="", refresh=False)`
+
+Opens the interactive 3D viewer and returns the handle you pass to the other three.
+
+- `viewer` — 10-character handle (`9d143640d1`); `url` — what to open. **Call this first.**
+- `levels`, `categories`, `disciplines` come back **with element counts**, so the agent picks a
+  filter value that exists instead of inventing one. On ZCB that is 21 levels / 18 categories /
+  4 disciplines over 14,416 elements. The i3s sentinel level `-2147483648` (meaning "unset") is
+  filtered out of that list rather than offered as a floor.
+- `overlay` takes comma-separated CSDI dataset ids drawn under the model — lots, registered
+  slopes, zoning — so a height or setback claim has site context behind it.
+- Every BIM tool accepts the handle, not just the interactive ones: `bim_elements(handle, ...)`
+  resolves it back to the service, so an agent can hold one short string for a whole session.
+
+### `bim_filter(source="", floors="", categories="", disciplines="", clear=False)`
+
+Narrows what draws and reports **how many elements that leaves** (`elements_shown` /
+`elements_total`) — counted from the cached attribute rows, not estimated from a screenshot.
+
+- `floors="5"` / `"3,4,5"` / `"G,1,2"` — `BldgLevel` values, i.e. the storey number, **not** an
+  elevation in metres. `bim_filter(viewer, floors="5")` on ZCB → `BldgLevel IN (5)` → 272 of 14,416.
+- `categories="Walls,Doors"` — sublayer names as `bim_viewer()` lists them; everything else is
+  turned off. `floors="5", categories="Walls,Doors"` together → 52 shown, 16 categories hidden.
+- `disciplines="Structural"` → `Discipline IN ('Structural')` → 3,745 on ZCB.
+- An unknown category is a **refusal**, not a silent no-op: the error lists the valid names. Same
+  for `clear=True`, which resets the model rather than filtering it to nothing.
+
+The mechanism matters if you extend this. Measured in a browser, not assumed:
+
+| what you reach for | result |
+|---|---|
+| `BuildingFilter` expression (`BldgLevel` / `Discipline` / `Category`) | **works** — isolates a storey or a discipline |
+| second `BuildingFilterBlock` `1=1` as `wire-frame` | **works** — ghosts the context, target stays solid |
+| `sublayer.visible` | **works** — the reliable category switch |
+| `sublayer.definitionExpression` | **no effect** — 0.0% pixel change |
+| `sublayer.queryFeatures` / `queryExtent` | **throws** `query-not-available` on the sublayer too |
+| `BuildingFilter` on `OBJECTID` | **matches ~17 elements, not 1** |
+
+The last two rows contradict the published guidance, which says to query the *sublayer* rather than the
+root and to isolate one component with `OBJECTID = n`. On a hosted BSL neither holds: both query methods
+throw on the sublayer, so the browser cannot read geometry at all, and `OBJECTID_1` restarts in every
+sublayer — on ZCB, `OBJECTID_1 = 33` matches 17 elements (a beam, a column, a door, a pipe) and renders as
+a building-shaped scatter rather than one component.
+
+### `bim_select(source="", ids="", uids="", where="", isolate=True, ghost=True, tilt=62, heading=20)`
+
+Flies the camera to chosen elements, marks them, and shows the first one's attributes.
+
+- `uids="Doors/0:33"` — **the exact way to name an element.** A `uid` is `sublayer/node:id`, and
+  that triple is the only unique key in i3s: feature ids restart inside a node *and* node ids
+  restart in every sublayer, so on ZCB `ids=[33]` matches **17** different elements across 17
+  sublayers. `bim_elements()` rows carry the `uid`; quote that.
+- `ids=33` (or `[33]`, or `"33,34"`) is still accepted for convenience, but the reply reports how
+  many it matched, so a wrong guess is visible. `where="Category=door AND BldgLevel=10"` is the
+  third way in — on ZCB that is 13 elements.
+- `isolate=True` narrows the drawing to the hits' own categories and levels, so the selection is not a
+  red dot lost in a whole building. `bim_clear` undoes it.
+- `ghost=True` (the default for a focused selection, ≤200 elements) keeps the rest of the building as a
+  **wire-frame outline** instead of hiding it, and frames the whole building rather than the element. That
+  is what makes one component readable in context — i3s still cannot hide every other instance, so
+  ghosting is the honest alternative. Set `ghost=False` to fly right up to the element instead.
+- `unknown_uids` / `unknown_ids` report a typo instead of a silent zero. Asking to select nothing
+  is refused as an error rather than returning an empty success.
+- Returns `bbox` (the elements), `camera_bbox` (where the camera aimed) and `record` — the same attribute
+  card the page shows, so the agent can *name* what it flew to:
+  `{"uid": "Doors/0:33", "Category": "door", "Family": "1000 x 2032mm", "BldgLevel": 10,
+  "Mark": "D7yy"}`. With several matches, `record_note` says which one the card describes.
+
+Ghosting has two traps, both of which make it look broken:
+
+- Filter by the **`Category` attribute**, not the sublayer title. The attribute holds lowercase Revit
+  values (`'door'`) while the sublayer is called `Doors`; a bare `'Doors'` is not a predicate, it silently
+  matched everything, the solid block covered the whole building and nothing looked ghosted.
+- Do **not** also set `sublayer.visible`. Shell sublayers (`ExteriorShell`, `Site`, `Stairs`) are absent
+  from the element catalogue, so hiding "every category except Doors" leaves the envelope drawn solid over
+  the ghost.
+
+Mode values are hyphenated: `{ type: "wire-frame" }`, `{ type: "x-ray" }`, `{ type: "solid" }`. Bare
+`wireframe` / `xray` are accepted at construction and then throw inside the SDK
+(`Cannot read properties of null (reading 'type')`).
+
+### `bim_clear(source="")`
+
+Whole model, no selection, no filter. `state_rev` advances, so the open page visibly resets.
+
+**What the camera actually does.** `goTo({center, scale})` resolves without error in this page and
+moves nothing, so the viewer assigns a `Camera` directly. The view's centre is where the optical
+axis meets the ground, so with the eye at height `z` and tilt `t` the camera must sit `z·tan(t)`
+*behind* the target along the heading — placing it there centres the target in one step
+(measured error: 2 px horizontal, 27 px vertical) instead of iterating a feedback loop that never
+converged.
+
+The vertical aim is the element's own storey elevation (`BldgLevel_Elev`), not a fixed height.
+Storey numbers are not heights: on ZCB, `BldgLevel = 10` sits at 3.95 m. Aiming a door at a
+hard-coded 12 m left it ~77 px low in an 800 px view, framed mostly on car park.
+
+**Two facts that look like bugs but are not.** `position` in an i3s node is the **node anchor**, not
+the element — one node's 241 features share it. It still locates the building correctly (the drawn
+model's ground pad lands exactly at that centre), so frame by it; just do not read it as a
+per-element coordinate. And the service's declared `fullExtent` is not a reliable target either: on
+ZCB that document sat ~200 m from the geometry. Aim at the element-position extent.
+
+**Expect a slow first paint.** A hosted BSL streams tiles: ~40 s for a 14 k-element model on
+software rendering. If the page looks empty, wait — do not conclude the layer failed, and do not
+`hitTest` to decide (it returns empty for BSL geometry even when the model is on screen).
+
+---
+
+## Floor filtering when the model is not a Building Scene Layer
+
+A BIM delivered as a **web scene** is often not one `BuildingSceneLayer` at all: the item holds a
+`GroupLayer` of sibling `ArcGISSceneServiceLayer`s, one per published service. Building E
+(`2b495455eb4148bbb05f1b255c0a527b`) is 21 of them. There is then no sublayer tree, no
+`BuildingFilter`, and **no floor filtering that the SDK can do for you** — `BldgLevel` is just an
+attribute, and whether it can isolate a storey depends entirely on how the exporter grouped geometry
+into i3s **nodes**.
+
+An i3s node is the unit the renderer draws and hides. A predicate does not select elements inside a
+node; it selects the node. So if nodes span storeys, a storey filter cannot work:
+
+| measured on Building E | value |
+|---|---|
+| elements in `Wall_Mullions` | 3,910 (**98.3%** of the whole model) |
+| nodes holding them | **34** |
+| nodes whose elements all share one level | **0 of 34** |
+| node composition | 14 hold levels 0+1+3+4, 19 hold 1+3+4 |
+| element bbox height, median | 20.55 m |
+
+That is why "select L0" drew the entire glass façade. Revit→i3s exports commonly group nodes by
+element *type* rather than by storey, so `BldgLevel` filtering is only as good as the publisher's
+grouping — and it is not something the client can fix by asking differently.
+
+**Check it in one call before promising a floor filter.** Compare node count to element count, then
+test whether any node holds a single level:
+
+```python
+# from the cached rows: a level filter can only work if some node is level-pure
+pure = sum(1 for n in nodes if len({e["BldgLevel"] for e in n["elements"]}) == 1)
+```
+
+If `pure == 0`, say so and filter geometrically instead. On Building E the honest answer was
+"no storey can be filtered by attribute", reported as a finding — not worked around silently.
+
+**The alternative that does work is to cut the geometry.** `SliceAnalysis` removes everything above a
+horizontal plane regardless of node grouping, so it isolates a storey because the geometry is gone,
+not because a predicate matched. Verified numerically by z-sampling `view.hitTest()` either side of
+the cut:
+
+| plane z | hits span | storey isolated |
+|---|---|---|
+| 408.20 | 391.73 – 408.20 | above L4 |
+| 403.61 | 391.73 – 403.60 | above L3 |
+| 399.20 | 391.73 – 399.18 | above L1 |
+| 394.65 | 391.73 – 394.60 | above L0 |
+
+Slab elevations came from clustering `hitTest` z values on a near-orthographic elevation view, not
+from a level field: **391.73 / 394.66 / 399.20 / 403.61 / 408.19**, roof cap 408.64. (The model's
+`fullExtent` is 339.3–460.9 and is not the building — see the note above.) Set the cut slightly
+*below* the slab top (`CUT_EPS = 0.5`), or the cut plane is capped by the slab's own solid sheet and
+the section reads as a blank white plate.
+
+SDK 5.0 specifics, each of which cost a debugging cycle:
+
+| what you reach for | result |
+|---|---|
+| `analysis/SliceAnalysis.js` | **correct path** — `views/analysis/SliceAnalysis.js` is a 404 |
+| `SliceAnalysis` with a plane | **works** — cuts i3s geometry, node grouping irrelevant |
+| two opposing planes forming a band | **does not compose** — both accepted, band not formed |
+| `view.clippingArea` in local viewing mode | **silently does nothing** — before/after identical |
+| `elevationInfo.mode: "absoluteHeight"` | **invalid** — must be hyphenated `"absolute-height"` |
+| `tilt` | measured **from vertical** (0 = straight down, 90 = horizon) |
+| `hitTest()` for verification | works, but hits carry `mapPoint` and **no `graphic`** — filter on `mapPoint.z` |
+
+Framing matters as much as cutting: a 4.6 m storey collapsed to a few pixels at `distance=300`, so
+each storey needs its own distance and tilt. A candidate sweep (210 m / tilt 70 for the mid storeys)
+was what produced a legible section.
 
 ---
 
@@ -810,6 +1015,51 @@ HK_MCP_PUBLIC_URL=https://maps.example.hk/  # the URL build_map returns to the c
 | The map does not refresh | The preview page must be reloaded after each `build_map` call. |
 | The map is slow or the browser stalls | The layer is very large. Use the `warn` output from `build_map` as a guide and prefer smaller or district-level datasets. |
 | Port 8777 is already in use | Set `HK_MCP_PORT` to a free port in the client's `env` block. |
+| **Generated page is blank / model never appears, but the panel and its buttons are there** | A **Content Security Policy** on the hosting origin is blocking the ArcGIS CDN. `script-src` commonly allows `https:` — so the modules load, the DOM builds and the panel looks fine — while `connect-src` does not, so every tile, module chunk and elevation request is refused. The page is not broken; its host is. Serve it from `http://127.0.0.1:8777` instead. See [Blank page behind a strict CSP](#blank-page-behind-a-strict-csp). |
+| Console warns `Cannot destructure property 'zoomIn' of 'this.messages' as it is null` | Same cause. The widget i18n bundle comes from `js.arcgis.com`; with that blocked the Zoom widget has no labels and throws. Not a widget bug. |
+
+### Blank page behind a strict CSP
+
+Measured on a page whose host injected a CSP: **79 violations, 0 of 21 layers loaded**, while the
+same files served from `127.0.0.1` loaded **21 of 21** with **0** violations and no console errors.
+A third run re-served the *same* policy with the ArcGIS hosts whitelisted and loaded 21/21 again —
+which isolates the header as the only variable.
+
+| blocked host | violations | directive | what it broke |
+|---|---:|---|---|
+| `tiles.arcgis.com` | 21 | `connect-src` | every i3s scene service, one per layer |
+| `js.arcgis.com` | 16 | `connect-src`, `default-src`, `worker-src` | lazily-fetched SDK chunks, theme CSS, i3s decode workers |
+| `cdn.arcgis.com` | 2 | `connect-src` | basemap style, web scene item JSON |
+| `elevation3d.arcgis.com` | 1 | `connect-src` | ground elevation |
+
+`connect-src` is the blocker — it alone accounts for all 40 network violations. The minimum header
+that makes a generated page work inside a locked-down host:
+
+```
+connect-src  'self' https: https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+default-src  'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+script-src   'self' 'unsafe-inline' 'unsafe-eval' blob: data: https: https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+worker-src   'self' blob: https: https://*.arcgis.com https://*.arcgisonline.com
+img-src      'self' data: blob: https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+style-src    'self' 'unsafe-inline' https://js.arcgis.com
+```
+
+`worker-src` is not optional: i3s geometry is decoded in workers, so without it the layer loads its
+metadata and still draws nothing.
+
+**How to tell a CSP problem from an application bug in one step.** Load the page twice — once on
+`http://127.0.0.1:8777` (the built-in server sends no CSP) and once where it fails. If localhost
+works, the header is the cause and no amount of application debugging will show it, because the
+blocked requests never reach the code. Two consequences worth remembering when validating:
+
+- The SDK renders Zoom/Compass as `<calcite-button class="esri-widget--button">` and puts the
+  accessible name in **`title`**, not `aria-label`. Asserting on `aria-label` reports a false failure
+  on a perfectly healthy page.
+- `Search.allSources` is populated **asynchronously** after `when()`, and `Search.suggest()` resolves
+  to a non-array result object. Reading either synchronously looks like "no geocoding" when the
+  widget is fine; `search()` is the reliable liveness probe.
+- A failed request whose `errorText` is `net::ERR_ABORTED` was cancelled — camera motion or teardown.
+  Only a policy block or a 4xx/5xx is evidence of a real failure.
 
 ---
 
@@ -832,7 +1082,7 @@ python3 test_install_path.py     # against the published git URL — i.e. what u
 
 ---
 
-## BIM scene layers — audit, not rendering
+## BIM scene layers — audit over REST, then drive the map
 
 BIM published to ArcGIS is an **i3s scene layer** (`.slpk`, or a `/SceneServer`). It has no `/query`
 endpoint: `capabilities` may still advertise Query, but `/layers/{n}/query` answers `Invalid URL`.
@@ -855,9 +1105,15 @@ their disciplines under group sublayers (`Full Model` → `Structural` → `Beam
 - `bim_elements(source, where="Category=Doors AND BldgLevel=3", limit=20, group_by="ElementType")` —
   filter or count. `where` is a real expression: `= != > >= < <=`, `AND/OR/NOT`, `LIKE '%PANTRY%'`,
   `IN (a, b)`, `IS NULL`, or a bare word matched across every field; a zero-match answer lists the
-  values the field actually holds.
+  values the field actually holds. Every row carries a `uid` (`sublayer/node:id`) — the key
+  `bim_select` expects.
 - `site_zoning(source=<model> | lat=…&lon=…, radius_m=…)` — OZP zone, height control, slopes, landslides.
 - `lot_check(source)` — which lots the model extent sits on (bbox level) plus zone labels.
+- `bim_viewer` / `bim_filter` / `bim_select` / `bim_clear` — the **interactive** half: open the model,
+  filter it to a storey, fly to a component, reset. See
+  [Interactive Building Scene Layers](#interactive-building-scene-layers); those four are the reason a
+  BIM answer can end with the model moving rather than a table. `bim_findings(mode="map"|"scene")`
+  remains the static, shareable report page.
 
 Rules:
 

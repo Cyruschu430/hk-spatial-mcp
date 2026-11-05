@@ -90,9 +90,75 @@ group sublayers ('Full Model' → 'Structural' → 'Beams'); all of them are mer
 - `site_zoning(source=<model> | lat=…&lon=…)` → OZP zone, height control, slopes, landslides.
 - `lot_check(source)` → lots under the model extent (bbox level) + zone labels.
 
-Workflow when someone hands you a model: `bim_audit` → `bim_floors` → `site_zoning` → answer with a table
-plus the `links.map_viewer` / `links.scene_viewer` pair. One read caches every row (`refresh=True` to
-re-read); a second call is instant.
+### Driving the map (do this, not just a table)
+
+Open a viewer, then act on it. The page polls its state file, so every later call updates the open tab
+with no reload — the three tools below all take the same `viewer` handle.
+
+- `bim_viewer(source, title="", overlay="<CSDI ids>")` → `viewer` handle + `url` (open it), plus
+  `levels` / `categories` / `disciplines` with element counts. **Call this first.**
+- `bim_filter(viewer, floors="5,10", categories="Walls,Doors", disciplines="Structural", clear=False)` →
+  narrows what draws; returns `elements_shown` / `elements_total` so the number is real, not a guess.
+  Floors use the `BldgLevel` number, not an elevation. An unknown name is an error listing the valid ones.
+- `bim_select(viewer, uids="Doors/0:33" | ids=[…] | where="Category=door AND BldgLevel=10", isolate=True)` →
+  flies the camera and marks the elements; returns `matched`, a `record` card, and `ghost`.
+- `bim_clear(viewer)` → whole model, no selection.
+
+Name an element by `uid`, never by `id`. `bim_elements()` rows carry `uid` = `sublayer/node:id`, and that
+triple is the only unique key: i3s feature ids restart inside a node *and* node ids restart in every
+sublayer, so `ids=[33]` on the ZCB model matches 17 different elements and `ids` cannot be trusted to mean
+one thing. `bim_select` reports `unknown_uids`, so a typo is visible instead of silently selecting nothing.
+
+**Ghosting.** For a focused selection `bim_select` leaves the rest of the building as a wire-frame
+outline rather than hiding it, so the element reads in context. Two traps were measured, both of which
+look like the feature being broken:
+
+- Filter by the **`Category` attribute**, not the sublayer title. The attribute holds lowercase Revit
+  values (`'door'`) while the sublayer is called `Doors`. A bare quoted string (`'Doors'`) is not a
+  predicate — it silently matched *everything*, the solid block covered the whole building, and no ghost
+  appeared.
+- Ghosting must **not** be combined with `sublayer.visible`. Shell sublayers (`ExteriorShell`, `Site`,
+  `Stairs`) are absent from the element catalogue, so a hide-by-catalogue list leaves the envelope drawn
+  solid on top of the ghost.
+
+Only the *two-block* form ghosts: block 1 = the targets `solid`, block 2 = `1=1` as `wire-frame`. The mode
+values are hyphenated (`wire-frame`, `x-ray`); bare `wireframe`/`xray` throw inside the SDK.
+
+Which mechanism actually filters, measured in a browser rather than assumed:
+
+| what you reach for | result |
+|---|---|
+| `BuildingFilter` expression (`BldgLevel` / `Discipline` / `Category`) | **works** — isolates a storey, a discipline, a category |
+| second block `1=1` as `wire-frame` | **works** — ghosts the context, keeps the target solid |
+| `sublayer.visible` | **works** — the reliable category switch |
+| `sublayer.definitionExpression` | **no effect** — 0.0% pixel change; never rely on it |
+| `sublayer.queryFeatures` / `queryExtent` | **throws** `query-not-available` on the sublayer too |
+| `BuildingFilter` on `OBJECTID` / `ObjectId` | **matches ~17 elements, not 1** — see below |
+
+Two claims from the Esri docs do not hold for hosted building layers. `queryFeatures()` throws even on a
+*sublayer* (the docs say to query the sublayer, not the root), and so does `queryExtent()`, so no geometry
+can be read in the browser at all. And isolating one component with `OBJECTID = n` does not work: on ZCB
+`OBJECTID_1 = 33` matches **17** elements across 17 sublayers — a beam, a column, a door, a pipe — because
+the field restarts per sublayer. The rendered result is a building-shaped scatter, not one component
+(verified by screenshot). Use `uid` and ghost instead.
+
+- `position` in an i3s node is the **node anchor**, not the element — one node's 241 features share it. It
+  still locates the building correctly (the model's ground pad draws exactly at that centre), so frame by
+  it; just do not read it as a per-element coordinate.
+- The service's declared `fullExtent` is not a reliable camera target either: on the ZCB layer that
+  document sat ~200 m from the geometry. Aim at the element-position extent instead.
+- With ghosting on, the camera frames the **building**, because the whole point is "where is this inside
+  it". Aiming at a single element gives a zero-span box and puts the eye inside the roof (measured: the
+  viewport filled with one door panel). The vertical aim comes from `BldgLevel_Elev`, not a fixed height —
+  storeys are real elevations (a storey-10 door on ZCB is at 3.95 m), so a hard-coded 12 m put it low in
+  frame and mostly showed car park.
+
+A hosted BSL takes a long time to stream on first paint (measured ~40 s for a 14 k-element model on
+software rendering). If the page looks empty, wait — do not conclude the layer failed.
+
+Workflow when someone hands you a model: `bim_audit` → `bim_floors` → `site_zoning` → **`bim_viewer`**, then
+`bim_filter` / `bim_select` to show the finding → answer with a table plus the `links.map_viewer` /
+`links.scene_viewer` pair. One read caches every row (`refresh=True` to re-read); a second call is instant.
 
 Never claim: GFA, floor area, travel distance, compartment size, clash detection, or "compliant". Report
 pass / fail / **cannot check** — the third state is the honest one when geometry is missing. `Mark` of 0
@@ -105,6 +171,52 @@ Two field names lie, so quote the numbers with care:
 - `bim_floors().per_level[].area_m2_bbox` stays an upper bound only if the export publishes a bbox per
   feature. When it does not, every feature in a node inherits the node's bbox (CIC: 410 slabs, 67
   distinct boxes), and per-level "area" sums node boxes — 15× the site. Count slabs; do not add areas.
+
+### Floor filtering on a non-BSL model — check before you promise it
+
+A BIM in a **web scene** is often not one `BuildingSceneLayer` but a `GroupLayer` of sibling
+`ArcGISSceneServiceLayer`s (Building E is 21). Then there is no sublayer tree and no `BuildingFilter`,
+and `BldgLevel` is only an attribute — so whether a storey can be isolated depends on how the exporter
+grouped geometry into i3s **nodes**, which is the unit the renderer hides. A predicate selects a node,
+never elements inside it.
+
+Building E, measured: `Wall_Mullions` = 3,910 elements (98.3% of the model) in **34 nodes**, and
+**0 of 34 nodes are level-pure** (14 hold levels 0+1+3+4, 19 hold 1+3+4; median element height
+20.55 m). Filtering `BldgLevel` there returns whole nodes spanning the full façade — "L0" draws the
+entire glass frame. Revit→i3s exports commonly group by element *type*, not storey.
+
+So: count nodes against elements, and check whether any node holds a single level. If none does,
+**say the filter cannot work and report it as a finding** — do not quietly return the whole model.
+
+The mechanism that does work is to **cut the geometry**, since `SliceAnalysis` removes everything
+above a plane regardless of node grouping. Verified by z-sampling `hitTest()` either side of the cut:
+
+| plane z | hits span |
+|---|---|
+| 408.20 | 391.73 – 408.20 |
+| 403.61 | 391.73 – 403.60 |
+| 399.20 | 391.73 – 399.18 |
+| 394.65 | 391.73 – 394.60 |
+
+SDK 5.0 gotchas, each measured:
+
+- `analysis/SliceAnalysis.js` is correct; `views/analysis/SliceAnalysis.js` is a **404**.
+- Two opposing planes to form a storey **band do not compose** — both accepted, band not formed.
+- `view.clippingArea` in local viewing mode **silently does nothing** (before/after identical).
+- `elevationInfo.mode` must be hyphenated: `"absolute-height"`, not `"absoluteHeight"`.
+- `tilt` is measured **from vertical** — 0 is straight down, 90 is the horizon.
+- `hitTest()` hits carry `mapPoint` but **no `graphic`**; filter on `mapPoint.z`.
+- Put the cut **just below** the slab top, or the plane is capped by the slab's own solid sheet and
+  the section reads as a blank plate. A 4.6 m storey needs its own distance and tilt to be legible.
+
+### When a generated page renders blank
+
+Try it on `http://127.0.0.1:8777` (the built-in server sends no CSP) before debugging any code. If it
+works there, a **Content Security Policy** on the original host is blocking the ArcGIS CDN — typically
+`script-src` allowing `https:` (so modules load and the panel draws) while `connect-src` refuses the
+tiles. Measured: 79 violations and 0/21 layers on the locked-down host, 0 violations and 21/21 on
+localhost. `connect-src` is the blocker. Do not report a CSP failure as an application bug, and do not
+chase widget errors that vanish on localhost.
 
 ## Rules
 

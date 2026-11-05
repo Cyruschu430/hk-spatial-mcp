@@ -9,3 +9,12 @@ hk-spatial/
 .env.*
 !.env.example
 eval-report*.json
+
+# scratch output when HK_MCP_DIR points at ./workspace. Holds multi-MB i3s attribute
+# caches, downloaded GeoJSON and generated pages — 191 MB on a single BIM audit, none of
+# it source. The BIM cache is also not valid JSON as written (it carries bare NaN), so a
+# checked-in copy would be unusable as well as large.
+workspace/
+node_modules/
+package-lock.json
+*.log

@@ -63,6 +63,7 @@ m.build_scene([res], 'Hong Kong Impounding Reservoirs', 'imagery', tilt=65)"
 - [Installation](#installation)
 - [Prompt cookbook](#prompt-cookbook)
 - [Tool reference](#tool-reference)
+- [BIM audit tools](#bim-audit-tools)
 - [Interactive Building Scene Layers](#interactive-building-scene-layers)
 - [Floor filtering when the model is not a Building Scene Layer](#floor-filtering-when-the-model-is-not-a-building-scene-layer)
 - [Configuration](#configuration)
@@ -580,6 +581,61 @@ building is framed on load. Point clouds, Gaussian splats and the scene's basema
 (the satellite basemap stands in). Private scene documents need `ARCGIS_TOKEN`; layers that are
 world-readable need no token at all, which makes this a quick way to look at a shared BIM
 web scene without ArcGIS Pro or a sign-in.
+
+---
+
+## BIM audit tools
+
+Reading an i3s Building Scene Layer over REST — no `/query` endpoint exists and no `arcgis`
+package is needed. All eight take a `source`: a `/SceneServer` url or a 32-char AGOL item id.
+`bim_viewer`/`bim_filter`/`bim_select`/`bim_clear` (the interactive half) have their own section
+below.
+
+### `bim_audit(source, refresh=False)`
+
+Elements, levels, per-field emptiness, duplicate `Mark`s, category/family catalogue, slab coverage,
+and a verdict list. Note `completeness_pct` is **% empty**, not % filled — a model with no
+`Category`/`Family` at all is an exterior shell, and the audit says so instead of auditing it.
+
+### `bim_floors(source, refresh=False)`
+
+Slabs per level plus a bbox-area figure. The area is an **upper bound only when each feature carries
+its own bbox** — when a whole node shares one box (CIC: 410 slabs, 67 boxes), per-level sums come out
+at multiples of the site. Count slabs; do not quote areas.
+
+### `bim_elements(source, where="", limit=20, group_by="", refresh=False)`
+
+Filter or count elements with a real expression (`Category=Doors AND BldgLevel=3`,
+`RoomName LIKE '%PANTRY%'`). Every row carries `uid = sublayer/node:id` — the only unique key, since
+bare i3s ids restart inside every sublayer.
+
+### `site_zoning(source="", lon=None, lat=None, radius_m=150)`
+
+OZP zone, building-height control, registered man-made slopes and landslide records under the model
+extent or a point. The zoning layers are **public mirrors, not the statutory plans** — the tool says
+so in every answer.
+
+### `lot_check(source)`
+
+Lots intersecting the model extent (bbox level) with their zone labels, from the 377k-lot ArcGIS
+mirror of LandSD.
+
+### `bim_findings(source, mode="map", refresh=False)`
+
+Turns the audit into located findings (duplicate marks, dimensionless doors, slab coverage), a
+GeoJSON file, and a viewer page — `mode="map"` for 2D, `mode="scene"` for a 3D view with the model
+and glowing-dot markers. Every finding has coordinates and a reason; click a marker for the detail.
+
+### `bim_report(source, site=True, refresh=False)`
+
+A professional **A4 PDF audit report** — cover, executive summary, inventory, completeness, floors,
+statutory context (HK models only), methods and limits. Printed by a headless Chromium/Edge on the
+user's own machine; when no browser is found the HTML version is served instead of failing.
+
+### `publish_findings(source, title="BIM Audit Findings")`  *(requires `ARCGIS_TOKEN`)*
+
+Prepares the findings as a hosted-point-layer payload. Without a verified org account it returns
+`status: prepared, not published` — it never reports an item id it did not read back.
 
 ---
 
@@ -1130,7 +1186,7 @@ HK_MCP_PUBLIC_URL=https://maps.example.hk/  # the URL build_map returns to the c
 | The map does not refresh | The preview page must be reloaded after each `build_map` call. |
 | The map is slow or the browser stalls | The layer is very large. Use the `warn` output from `build_map` as a guide and prefer smaller or district-level datasets. |
 | Port 8777 is already in use | Set `HK_MCP_PORT` to a free port in the client's `env` block. |
-| **Generated page is blank / model never appears, but the panel and its buttons are there** | A **Content Security Policy** on the hosting origin is blocking the ArcGIS CDN. `script-src` commonly allows `https:` — so the modules load, the DOM builds and the panel looks fine — while `connect-src` does not, so every tile, module chunk and elevation request is refused. The page is not broken; its host is. Serve it from `http://127.0.0.1:8777` instead. See [Blank page behind a strict CSP](#blank-page-behind-a-strict-csp). |
+| **Generated page is blank / model never appears, but the panel and its buttons are there** | A **Content Security Policy** on the hosting origin is blocking the ArcGIS CDN. `script-src` commonly allows `https:` — so the modules load, the DOM builds and the panel looks fine — while `connect-src` does not, so every tile, module chunk and elevation request is refused. The page is not broken; its host is. Serve it from `http://127.0.0.1:8777` instead. See [Blank page behind a strict CSP](#blank-page-behind-a-strict-csp). **The WorkBuddy / CodeBuddy preview pane is exactly this case** — open the localhost url in a real browser; only `export_static_map` (a plain PNG) can show inside the pane. |
 | Console warns `Cannot destructure property 'zoomIn' of 'this.messages' as it is null` | Same cause. The widget i18n bundle comes from `js.arcgis.com`; with that blocked the Zoom widget has no labels and throws. Not a widget bug. |
 
 ### Blank page behind a strict CSP

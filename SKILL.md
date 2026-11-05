@@ -97,6 +97,12 @@ group sublayers ('Full Model' → 'Structural' → 'Beams'); all of them are mer
 - `bim_elements(source, where="Category=Doors", limit=20, group_by="ElementType")` → filter or count.
 - `site_zoning(source=<model> | lat=…&lon=…)` → OZP zone, height control, slopes, landslides.
 - `lot_check(source)` → lots under the model extent (bbox level) + zone labels.
+- `bim_findings(source, mode="map"|"scene")` → located findings + viewer page (glowing dots mark the
+  spots — they are position hints, not components).
+- `bim_report(source)` → professional **A4 PDF** audit report, printed by the headless Chromium/Edge
+  on the user's machine (none found → the HTML report is served instead). Statutory context appears
+  for HK models only; `publish_findings` prepares the AGOL upload and says "prepared, not published"
+  until a token is verified.
 
 ### Driving the map (do this, not just a table)
 
@@ -218,6 +224,11 @@ SDK 5.0 gotchas, each measured:
   the section reads as a blank plate. A 4.6 m storey needs its own distance and tilt to be legible.
 
 ### When a generated page renders blank
+
+**WorkBuddy / CodeBuddy preview pane: its CSP blocks the ArcGIS CDN, so maps, layers and widgets
+never draw there — that is the pane, not the page.** Tell the user to open the `localhost` url in a
+real browser; inside the pane only `export_static_map` (a plain PNG) can show. A page cannot relax a
+host's CSP — serving locally is the correct path, not a workaround.
 
 Try it on `http://127.0.0.1:8777` (the built-in server sends no CSP) before debugging any code. If it
 works there, a **Content Security Policy** on the original host is blocking the ArcGIS CDN — typically

@@ -215,8 +215,19 @@ Try it on `http://127.0.0.1:8777` (the built-in server sends no CSP) before debu
 works there, a **Content Security Policy** on the original host is blocking the ArcGIS CDN — typically
 `script-src` allowing `https:` (so modules load and the panel draws) while `connect-src` refuses the
 tiles. Measured: 79 violations and 0/21 layers on the locked-down host, 0 violations and 21/21 on
-localhost. `connect-src` is the blocker. Do not report a CSP failure as an application bug, and do not
-chase widget errors that vanish on localhost.
+localhost, and 21/21 when the same policy is re-served with the ArcGIS hosts whitelisted.
+`connect-src` is the blocker — it alone accounts for all 40 network violations.
+
+The fix is to whitelist explicit hosts, not to allow the web: `js.arcgis.com`, `*.arcgis.com`,
+`*.arcgisonline.com`, `static.arcgis.com` on `connect-src` / `default-src` / `script-src` /
+`worker-src` / `img-src` / `style-src`. That exact set was verified to load 21/21 layers with 0
+violations. `worker-src` is not optional — i3s geometry decodes in workers, so without it the layer
+loads metadata and still draws nothing.
+
+Do not report a CSP failure as an application bug, and do not chase widget errors that vanish on
+localhost. Three checks that look like defects but are not: Zoom/Compass expose their label in
+`title`, not `aria-label`; `Search.allSources` populates asynchronously after `when()`; and a failed
+request with `errorText` `net::ERR_ABORTED` was cancelled, not blocked.
 
 ## Rules
 

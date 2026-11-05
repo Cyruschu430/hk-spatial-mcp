@@ -1023,7 +1023,16 @@ HK_MCP_PUBLIC_URL=https://maps.example.hk/  # the URL build_map returns to the c
 Measured on a page whose host injected a CSP: **79 violations, 0 of 21 layers loaded**, while the
 same files served from `127.0.0.1` loaded **21 of 21** with **0** violations and no console errors.
 A third run re-served the *same* policy with the ArcGIS hosts whitelisted and loaded 21/21 again —
-which isolates the header as the only variable.
+which isolates the header as the only variable. A fourth run served the explicit-host policy printed
+below — no bare `https:` — and also loaded **21/21 with 0 violations**, so the fix does not depend on
+allowing the whole web.
+
+| environment | violations | layers |
+|---|---:|---:|
+| locked-down host (as shipped) | **79** | **0 / 21** |
+| localhost, no CSP header | **0** | **21 / 21** |
+| same policy, ArcGIS hosts whitelisted | **0** | **21 / 21** |
+| explicit-host policy, no bare `https:` | **0** | **21 / 21** |
 
 | blocked host | violations | directive | what it broke |
 |---|---:|---|---|
@@ -1032,25 +1041,30 @@ which isolates the header as the only variable.
 | `cdn.arcgis.com` | 2 | `connect-src` | basemap style, web scene item JSON |
 | `elevation3d.arcgis.com` | 1 | `connect-src` | ground elevation |
 
-`connect-src` is the blocker — it alone accounts for all 40 network violations. The minimum header
-that makes a generated page work inside a locked-down host:
+`connect-src` is the blocker — it alone accounts for all 40 network violations. The policy below was
+**verified end to end**: served with exactly these directives, the page loads **21 of 21 layers with
+0 violations and 0 console errors**. It names the ArcGIS hosts explicitly rather than allowing a bare
+`https:`, so it is a usable starting point rather than a hole:
 
 ```
-connect-src  'self' https: https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
-default-src  'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
-script-src   'self' 'unsafe-inline' 'unsafe-eval' blob: data: https: https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
-worker-src   'self' blob: https: https://*.arcgis.com https://*.arcgisonline.com
-img-src      'self' data: blob: https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
-style-src    'self' 'unsafe-inline' https://js.arcgis.com
+connect-src  'self' http://127.0.0.1:* https://js.arcgis.com https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+default-src  'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://js.arcgis.com https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+script-src   'self' 'unsafe-inline' 'unsafe-eval' blob: data: https://js.arcgis.com https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+worker-src   'self' blob: https://js.arcgis.com https://*.arcgis.com https://*.arcgisonline.com
+img-src      'self' data: blob: https://js.arcgis.com https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+style-src    'self' 'unsafe-inline' https://js.arcgis.com https://*.arcgis.com https://*.arcgisonline.com https://static.arcgis.com
+font-src     'self' data: blob: https://js.arcgis.com https://*.arcgis.com https://static.arcgis.com
 ```
 
 `worker-src` is not optional: i3s geometry is decoded in workers, so without it the layer loads its
-metadata and still draws nothing.
+metadata and still draws nothing. `http://127.0.0.1:*` in `connect-src` is what lets the generated
+page poll its own state file during local development; drop it for a hosted deployment.
 
 **How to tell a CSP problem from an application bug in one step.** Load the page twice — once on
 `http://127.0.0.1:8777` (the built-in server sends no CSP) and once where it fails. If localhost
 works, the header is the cause and no amount of application debugging will show it, because the
-blocked requests never reach the code. Two consequences worth remembering when validating:
+blocked requests never reach the code. Three false alarms cost a debugging cycle each, so check them
+before concluding a widget is broken:
 
 - The SDK renders Zoom/Compass as `<calcite-button class="esri-widget--button">` and puts the
   accessible name in **`title`**, not `aria-label`. Asserting on `aria-label` reports a false failure

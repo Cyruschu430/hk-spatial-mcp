@@ -36,6 +36,14 @@ CSDI is the source of truth: 1,150+ official Hong Kong datasets. The map rendere
 - Do the arithmetic locally when it is simple (distance, counts). Use the service when you need real
   projection or a proper geodesic buffer.
 
+**Some exports are attribute-only.** A few CSDI datasets export a valid FeatureCollection in which
+every feature is `geometry: null` — LandSD **Building** (87,982 features, 0 geometries) and LandSD
+**Lot** (1,606 / 0), both verified live 2026-11-05. They have no bbox, cannot be mapped, and cannot be
+spatially joined; `load_hk_data` now refuses them and `build_map` omits them rather than drawing an
+empty layer. Their **attributes are still readable** — `query_hk_data` / `summarise_hk_data` work
+normally. For mappable lot polygons use the ArcGIS mirror
+`Lot_in_Hong_Kong/FeatureServer/0` on `services3.arcgis.com` via `arcgis_request`.
+
 ## Earth observation (satellite — discovery is keyless)
 
 - `eo_search(bbox="minx,miny,maxx,maxy", start="YYYY-MM-DD", end="YYYY-MM-DD", collection="sentinel-2-l2a",

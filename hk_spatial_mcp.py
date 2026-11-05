@@ -296,12 +296,31 @@ def load_hk_data(dataset_id: str, name: str = "", refresh: bool = False) -> str:
     for f in feats:
         for x, y in _coords(f.get("geometry") or {}):
             lons.append(x), lats.append(y)
+    # Some CSDI exports are attribute-only: the GeoJSON is well formed and every feature is
+    # `geometry: null`, so `features` looks healthy while nothing can be drawn. LandSD "Building"
+    # is 87,982 features / 0 geometries (verified live 2026-11-05); "Lot" is 1,606 / 0. Left
+    # unguarded, load_hk_data reported success and build_map then drew an empty map, which reads
+    # as a tool bug rather than a property of the dataset.
+    if not lons:
+        return json.dumps({
+            "error": f"{dataset_id}: {len(feats)} features, but none carry geometry",
+            "detail": "every feature in this export is `geometry: null` — it is attribute-only, so "
+                      "no spatial tool can place it (no bbox, nothing to draw, no spatial join)",
+            "still_usable": "its attributes are readable: query_hk_data() and summarise_hk_data() "
+                            "work normally on the cached copy",
+            "known": ["LandSD Building — 87,982 features, 0 geometries",
+                      "LandSD Lot — 1,606 features, 0 geometries"],
+            "alternative": "for a mappable substitute use the ArcGIS mirror: Lot polygons as "
+                           "Lot_in_Hong_Kong/FeatureServer/0 on services3.arcgis.com "
+                           "(query via arcgis_request), or pick a neighbouring dataset that "
+                           "does export geometry — check `exportable` in search_hk_data()",
+            "file": str(path),
+        }, ensure_ascii=False)
     out = {
         "dataset_id": dataset_id, "features": len(feats),
         "geometry": sorted({(f.get("geometry") or {}).get("type") or "?" for f in feats}),
         "fields": list((feats[0].get("properties") or {}).keys())[:20],
-        "bbox": [round(min(lons), 5), round(min(lats), 5), round(max(lons), 5), round(max(lats), 5)]
-        if lons else None,
+        "bbox": [round(min(lons), 5), round(min(lats), 5), round(max(lons), 5), round(max(lats), 5)],
         "file": str(path), "cached": cached, "cached_days": round(age, 1) if cached else 0,
         "next": "call build_map([dataset_id, ...]) to see it in the ArcGIS web map",
     }
@@ -498,6 +517,13 @@ def _build(dataset_ids, title: str, basemap: str, labels: bool, mode: str, page:
         fc = json.loads(p.read_text(encoding="utf-8"))
         feats = fc.get("features") or []
         gtype = ((feats[0].get("geometry") or {}).get("type") or "Point") if feats else "Point"
+        # An attribute-only export (every `geometry: null`) would otherwise be added as a Point
+        # layer: the reply says "87,982 features" and the map draws nothing. Refuse it here too,
+        # so a map built from a cached file cannot contradict load_hk_data().
+        if feats and not any(f.get("geometry") for f in feats):
+            missing.append(f"{did}: {len(feats)} features carry no geometry (attribute-only "
+                           f"export) — omitted from the map; query_hk_data() can still read it")
+            continue
         # Every layer is served from disk and referenced by URL. GeoJSONLayer with an inline `blob`
         # fails to load on SDK 5.0 ("Cannot read properties of null (reading 'type')"), and urls keep
         # the HTML small for big layers — one code path, no size threshold.

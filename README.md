@@ -379,6 +379,17 @@ Downloads a dataset as GeoJSON (EPSG:4326) into the workspace and returns a summ
 geometry types, attribute field names, bounding box and file path. Feature records are never returned
 to the model.
 
+**A dataset can be attribute-only.** Some CSDI exports are a valid FeatureCollection whose every
+feature is `geometry: null`. Two were verified live on 2026-11-05 — LandSD **Building**
+(`landsd_rcd_1637211194312_35158`, 87,982 features, **0** with geometry) and LandSD **Lot**
+(`landsd_rcd_1637217253134_22729`, 1,606 / **0**). Reading them used to look like success: a healthy
+feature count, `bbox: null`, and then a map that drew nothing. They are now refused with the reason
+named, and `build_map` drops them from a multi-layer request instead of adding an empty layer.
+
+The attributes are real, so `query_hk_data` and `summarise_hk_data` still work on them — only the
+geometry is missing. For mappable lot polygons, use the ArcGIS mirror
+`Lot_in_Hong_Kong/FeatureServer/0` on `services3.arcgis.com` through `arcgis_request`.
+
 ### `summarise_hk_data(dataset_id, group_by="", value_field="", agg="count", top=20)`
 
 Answers a question about a dataset in **text**, without putting features into the chat.
@@ -1141,6 +1152,9 @@ Rules:
 4. `Mark` filled at 0 means unset, not a tag. Over 90% empty ⇒ the model cannot drive asset tracking.
 5. Say which layer is a mirror: OZP and BHC here are public mirrors — the statutory plan prevails.
 6. `completeness_pct` is **% empty**, not % filled — `Mark: 86.0` means 14% of elements carry one.
+7. A feature count is not evidence that anything can be drawn. Check the geometry, not the length:
+   some exports are attribute-only (see `load_hk_data`), and a bbox built over `null` geometries is
+   silently empty.
 
 ## Earth observation tools
 

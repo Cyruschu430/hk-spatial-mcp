@@ -794,6 +794,21 @@ A BIM delivered as a **web scene** is often not one `BuildingSceneLayer` at all:
 attribute, and whether it can isolate a storey depends entirely on how the exporter grouped geometry
 into i3s **nodes**.
 
+> The measurements below, the SDK mechanisms that do **not** work, and runnable scripts to reproduce
+> every figure are in **[`docs/findings/2026-11-05/`](docs/findings/2026-11-05/)**. That directory also
+> lists what is single-sample or unresolved — read
+> [`open-questions.md`](docs/findings/2026-11-05/open-questions.md) before quoting a number from here.
+
+> **A second, independent audit** — 40,283 elements on the Tsim Sha Tsui model `PXXCICXXZZA`,
+> against the OZP at `S/K1/28` — is in
+> **[`docs/findings/2026-11-06/`](docs/findings/2026-11-06/)**, with the working 4-tab app, raw
+> query results and screenshots. Two findings there are worth carrying forward: `Mark` is empty on
+> **86.0%** of elements and its 926 duplicate values silently add **4,229** join rows; and the
+> element `mbb` is **not an element bounding box** — all 40,283 rows inherit a node-level cube whose
+> x/y are in **degrees**, so any area or volume computed from it is a unit error. That directory
+> also records a case where this project's own figures were labelled m² when they were deg².
+
+
 An i3s node is the unit the renderer draws and hides. A predicate does not select elements inside a
 node; it selects the node. So if nodes span storeys, a storey filter cannot work:
 
@@ -802,7 +817,7 @@ node; it selects the node. So if nodes span storeys, a storey filter cannot work
 | elements in `Wall_Mullions` | 3,910 (**98.3%** of the whole model) |
 | nodes holding them | **34** |
 | nodes whose elements all share one level | **0 of 34** |
-| node composition | 14 hold levels 0+1+3+4, 19 hold 1+3+4 |
+| node composition | 27 hold levels 1+3+4, 7 hold 0+1+3+4 |
 | element bbox height, median | 20.55 m |
 
 That is why "select L0" drew the entire glass façade. Revit→i3s exports commonly group nodes by
@@ -1190,6 +1205,10 @@ HK_MCP_PUBLIC_URL=https://maps.example.hk/  # the URL build_map returns to the c
 | Console warns `Cannot destructure property 'zoomIn' of 'this.messages' as it is null` | Same cause. The widget i18n bundle comes from `js.arcgis.com`; with that blocked the Zoom widget has no labels and throws. Not a widget bug. |
 
 ### Blank page behind a strict CSP
+
+Full experiment, the per-host violation breakdown, and two scripts that reproduce it
+(`serve-csp.cjs` with `--mode none|strict|host`, and `verify-csp.cjs`) are in
+[`docs/findings/2026-11-05/csp-lockdown.md`](docs/findings/2026-11-05/csp-lockdown.md).
 
 Measured on a page whose host injected a CSP: **79 violations, 0 of 21 layers loaded**, while the
 same files served from `127.0.0.1` loaded **21 of 21** with **0** violations and no console errors.

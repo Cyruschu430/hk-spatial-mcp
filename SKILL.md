@@ -195,7 +195,7 @@ grouped geometry into i3s **nodes**, which is the unit the renderer hides. A pre
 never elements inside it.
 
 Building E, measured: `Wall_Mullions` = 3,910 elements (98.3% of the model) in **34 nodes**, and
-**0 of 34 nodes are level-pure** (14 hold levels 0+1+3+4, 19 hold 1+3+4; median element height
+**0 of 34 nodes are level-pure** (27 hold levels 1+3+4, 7 hold 0+1+3+4; median element height
 20.55 m). Filtering `BldgLevel` there returns whole nodes spanning the full façade — "L0" draws the
 entire glass frame. Revit→i3s exports commonly group by element *type*, not storey.
 

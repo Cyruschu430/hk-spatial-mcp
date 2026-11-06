@@ -1,0 +1,1131 @@
+{
+ "model": {
+  "name": "PXXCICXXZZA",
+  "publisher": "CIC BIM Sample · rng@esrichina.hk",
+  "service": "https://services5.arcgis.com/BFucnLaN4NszOvuE/arcgis/rest/services/PXXCICXXZZA/SceneServer",
+  "itemId": "563b20ee8c314e58a6fc007b733a48bd",
+  "i3s": "1.9",
+  "sublayers": 61,
+  "nodes": 1897,
+  "elements": 40283,
+  "published": "2023-12-19",
+  "centre": [
+   114.173988,
+   22.29919
+  ],
+  "bbox": [
+   114.173592523,
+   22.298989648,
+   114.174382698,
+   22.299390135
+  ],
+  "site_w_m": 81.4,
+  "site_h_m": 44.3,
+  "site_m2": 3604
+ },
+ "counts": {
+  "elements": 40283,
+  "levels_declared": 27,
+  "levels_with_slabs": 25,
+  "slabs": 410,
+  "categories": 45,
+  "families": 248,
+  "family_types": 399,
+  "sublayers_total": 61,
+  "sublayers_empty": 20,
+  "sublayers_populated": 41,
+  "rooms": 204,
+  "rooms_named": 0
+ },
+ "disciplines": [
+  {
+   "name": "Piping",
+   "n": 18297,
+   "pct": 45.4
+  },
+  {
+   "name": "Architectural",
+   "n": 11689,
+   "pct": 29.0
+  },
+  {
+   "name": "Electrical",
+   "n": 6254,
+   "pct": 15.5
+  },
+  {
+   "name": "Mechanical",
+   "n": 3427,
+   "pct": 8.5
+  },
+  {
+   "name": "Structural",
+   "n": 616,
+   "pct": 1.5
+  }
+ ],
+ "categories": [
+  {
+   "name": "Pipe Fittings",
+   "n": 8264,
+   "pct": 20.51
+  },
+  {
+   "name": "Pipes",
+   "n": 7838,
+   "pct": 19.46
+  },
+  {
+   "name": "Generic Models",
+   "n": 3699,
+   "pct": 9.18
+  },
+  {
+   "name": "Conduits",
+   "n": 2462,
+   "pct": 6.11
+  },
+  {
+   "name": "Conduit Fittings",
+   "n": 2185,
+   "pct": 5.42
+  },
+  {
+   "name": "Walls",
+   "n": 1813,
+   "pct": 4.5
+  },
+  {
+   "name": "Curtain Wall Mullions",
+   "n": 1686,
+   "pct": 4.19
+  },
+  {
+   "name": "Doors",
+   "n": 1401,
+   "pct": 3.48
+  },
+  {
+   "name": "Pipe Accessories",
+   "n": 1258,
+   "pct": 3.12
+  },
+  {
+   "name": "Ducts",
+   "n": 1163,
+   "pct": 2.89
+  },
+  {
+   "name": "Duct Fittings",
+   "n": 1067,
+   "pct": 2.65
+  },
+  {
+   "name": "Curtain Panels",
+   "n": 821,
+   "pct": 2.04
+  },
+  {
+   "name": "Sprinklers",
+   "n": 803,
+   "pct": 1.99
+  },
+  {
+   "name": "Flex Ducts",
+   "n": 610,
+   "pct": 1.51
+  },
+  {
+   "name": "Supports",
+   "n": 578,
+   "pct": 1.43
+  },
+  {
+   "name": "Lighting Fixtures",
+   "n": 521,
+   "pct": 1.29
+  },
+  {
+   "name": "Structural Framing",
+   "n": 498,
+   "pct": 1.24
+  },
+  {
+   "name": "Floors",
+   "n": 410,
+   "pct": 1.02
+  },
+  {
+   "name": "Electrical Fixtures",
+   "n": 386,
+   "pct": 0.96
+  },
+  {
+   "name": "Air Terminals",
+   "n": 254,
+   "pct": 0.63
+  },
+  {
+   "name": "Mechanical Equipment",
+   "n": 236,
+   "pct": 0.59
+  },
+  {
+   "name": "Cable Trays",
+   "n": 228,
+   "pct": 0.57
+  },
+  {
+   "name": "Rooms",
+   "n": 204,
+   "pct": 0.51
+  },
+  {
+   "name": "Fire Alarm Devices",
+   "n": 192,
+   "pct": 0.48
+  },
+  {
+   "name": "Plumbing Fixtures",
+   "n": 180,
+   "pct": 0.45
+  },
+  {
+   "name": "Cable Tray Fittings",
+   "n": 165,
+   "pct": 0.41
+  },
+  {
+   "name": "Stairs",
+   "n": 158,
+   "pct": 0.39
+  },
+  {
+   "name": "Handrails",
+   "n": 158,
+   "pct": 0.39
+  },
+  {
+   "name": "Railings",
+   "n": 141,
+   "pct": 0.35
+  },
+  {
+   "name": "Flex Pipes",
+   "n": 134,
+   "pct": 0.33
+  },
+  {
+   "name": "Structural Columns",
+   "n": 116,
+   "pct": 0.29
+  },
+  {
+   "name": "Windows",
+   "n": 115,
+   "pct": 0.29
+  },
+  {
+   "name": "Electrical Equipment",
+   "n": 114,
+   "pct": 0.28
+  },
+  {
+   "name": "Wall Sweeps",
+   "n": 108,
+   "pct": 0.27
+  },
+  {
+   "name": "Specialty Equipment",
+   "n": 98,
+   "pct": 0.24
+  },
+  {
+   "name": "Duct Accessories",
+   "n": 97,
+   "pct": 0.24
+  },
+  {
+   "name": "Landings",
+   "n": 89,
+   "pct": 0.22
+  },
+  {
+   "name": "Unassigned",
+   "n": 7,
+   "pct": 0.02
+  },
+  {
+   "name": "Roofs",
+   "n": 7,
+   "pct": 0.02
+  },
+  {
+   "name": "Ceilings",
+   "n": 6,
+   "pct": 0.01
+  },
+  {
+   "name": "Site",
+   "n": 5,
+   "pct": 0.01
+  },
+  {
+   "name": "Casework",
+   "n": 4,
+   "pct": 0.01
+  },
+  {
+   "name": "Structural Foundations",
+   "n": 2,
+   "pct": 0.0
+  },
+  {
+   "name": "Ramps",
+   "n": 1,
+   "pct": 0.0
+  },
+  {
+   "name": "Lighting Devices",
+   "n": 1,
+   "pct": 0.0
+  }
+ ],
+ "levels": [
+  {
+   "label": "B3",
+   "elev": -9.0,
+   "elements": 66,
+   "slabs": 2,
+   "top_cats": [
+    {
+     "name": "Duct Fittings",
+     "n": 18
+    },
+    {
+     "name": "Ducts",
+     "n": 17
+    },
+    {
+     "name": "Generic Models",
+     "n": 15
+    },
+    {
+     "name": "Windows",
+     "n": 7
+    },
+    {
+     "name": "Walls",
+     "n": 3
+    }
+   ]
+  },
+  {
+   "label": "S_100_B3/F",
+   "elev": -9.0,
+   "elements": 66,
+   "slabs": 2,
+   "top_cats": [
+    {
+     "name": "Structural Columns",
+     "n": 34
+    },
+    {
+     "name": "Structural Framing",
+     "n": 18
+    },
+    {
+     "name": "Walls",
+     "n": 12
+    },
+    {
+     "name": "Floors",
+     "n": 2
+    }
+   ]
+  },
+  {
+   "label": "B2",
+   "elev": -4.5,
+   "elements": 68,
+   "slabs": 2,
+   "top_cats": [
+    {
+     "name": "Duct Fittings",
+     "n": 19
+    },
+    {
+     "name": "Ducts",
+     "n": 18
+    },
+    {
+     "name": "Generic Models",
+     "n": 15
+    },
+    {
+     "name": "Windows",
+     "n": 7
+    },
+    {
+     "name": "Walls",
+     "n": 3
+    }
+   ]
+  },
+  {
+   "label": "S_100_B2/F",
+   "elev": -4.5,
+   "elements": 50,
+   "slabs": 2,
+   "top_cats": [
+    {
+     "name": "Structural Framing",
+     "n": 18
+    },
+    {
+     "name": "Structural Columns",
+     "n": 18
+    },
+    {
+     "name": "Walls",
+     "n": 12
+    },
+    {
+     "name": "Floors",
+     "n": 2
+    }
+   ]
+  },
+  {
+   "label": "B1",
+   "elev": 0.0,
+   "elements": 131,
+   "slabs": 2,
+   "top_cats": [
+    {
+     "name": "Walls",
+     "n": 48
+    },
+    {
+     "name": "Duct Fittings",
+     "n": 30
+    },
+    {
+     "name": "Ducts",
+     "n": 24
+    },
+    {
+     "name": "Generic Models",
+     "n": 16
+    },
+    {
+     "name": "Windows",
+     "n": 7
+    }
+   ]
+  },
+  {
+   "label": "B1F",
+   "elev": 0.0,
+   "elements": 45,
+   "slabs": 0,
+   "top_cats": [
+    {
+     "name": "Structural Framing",
+     "n": 18
+    },
+    {
+     "name": "Structural Columns",
+     "n": 18
+    },
+    {
+     "name": "Walls",
+     "n": 9
+    }
+   ]
+  },
+  {
+   "label": "Datum",
+   "elev": 0.0,
+   "elements": 63,
+   "slabs": 2,
+   "top_cats": [
+    {
+     "name": "Pipes",
+     "n": 32
+    },
+    {
+     "name": "Ducts",
+     "n": 24
+    },
+    {
+     "name": "Pipe Fittings",
+     "n": 3
+    },
+    {
+     "name": "Floors",
+     "n": 2
+    },
+    {
+     "name": "Pipe Accessories",
+     "n": 1
+    }
+   ]
+  },
+  {
+   "label": "G/F +4.50",
+   "elev": 4.5,
+   "elements": 5950,
+   "slabs": 45,
+   "top_cats": [
+    {
+     "name": "Curtain Wall Mullions",
+     "n": 1685
+    },
+    {
+     "name": "Curtain Panels",
+     "n": 821
+    },
+    {
+     "name": "Pipe Fittings",
+     "n": 703
+    },
+    {
+     "name": "Pipes",
+     "n": 663
+    },
+    {
+     "name": "Walls",
+     "n": 381
+    }
+   ]
+  },
+  {
+   "label": "1/F +9.50",
+   "elev": 9.5,
+   "elements": 3425,
+   "slabs": 31,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 730
+    },
+    {
+     "name": "Pipes",
+     "n": 698
+    },
+    {
+     "name": "Conduits",
+     "n": 305
+    },
+    {
+     "name": "Generic Models",
+     "n": 299
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 263
+    }
+   ]
+  },
+  {
+   "label": "2/F +12.65",
+   "elev": 12.65,
+   "elements": 2264,
+   "slabs": 22,
+   "top_cats": [
+    {
+     "name": "Pipes",
+     "n": 580
+    },
+    {
+     "name": "Pipe Fittings",
+     "n": 536
+    },
+    {
+     "name": "Conduits",
+     "n": 187
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 168
+    },
+    {
+     "name": "Doors",
+     "n": 119
+    }
+   ]
+  },
+  {
+   "label": "3/F +15.80",
+   "elev": 15.8,
+   "elements": 1977,
+   "slabs": 22,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 458
+    },
+    {
+     "name": "Pipes",
+     "n": 445
+    },
+    {
+     "name": "Generic Models",
+     "n": 229
+    },
+    {
+     "name": "Conduits",
+     "n": 137
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 123
+    }
+   ]
+  },
+  {
+   "label": "4/F +18.95",
+   "elev": 18.95,
+   "elements": 1805,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 441
+    },
+    {
+     "name": "Pipes",
+     "n": 394
+    },
+    {
+     "name": "Generic Models",
+     "n": 186
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "5/F +22.10",
+   "elev": 22.1,
+   "elements": 1802,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 434
+    },
+    {
+     "name": "Pipes",
+     "n": 394
+    },
+    {
+     "name": "Generic Models",
+     "n": 188
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "6/F +25.25",
+   "elev": 25.25,
+   "elements": 1818,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 443
+    },
+    {
+     "name": "Pipes",
+     "n": 399
+    },
+    {
+     "name": "Generic Models",
+     "n": 192
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "7/F +28.40",
+   "elev": 28.4,
+   "elements": 1799,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 435
+    },
+    {
+     "name": "Pipes",
+     "n": 393
+    },
+    {
+     "name": "Generic Models",
+     "n": 188
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "8/F +31.55",
+   "elev": 31.55,
+   "elements": 1796,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 434
+    },
+    {
+     "name": "Pipes",
+     "n": 391
+    },
+    {
+     "name": "Generic Models",
+     "n": 188
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "9/F +34.70",
+   "elev": 34.7,
+   "elements": 1794,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 434
+    },
+    {
+     "name": "Pipes",
+     "n": 392
+    },
+    {
+     "name": "Generic Models",
+     "n": 184
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "10/F +37.85",
+   "elev": 37.85,
+   "elements": 1797,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 433
+    },
+    {
+     "name": "Pipes",
+     "n": 393
+    },
+    {
+     "name": "Generic Models",
+     "n": 188
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "11/F +41.00",
+   "elev": 41.0,
+   "elements": 1808,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 437
+    },
+    {
+     "name": "Pipes",
+     "n": 396
+    },
+    {
+     "name": "Generic Models",
+     "n": 192
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "12/F +44.15",
+   "elev": 44.15,
+   "elements": 3103,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 881
+    },
+    {
+     "name": "Pipes",
+     "n": 834
+    },
+    {
+     "name": "Generic Models",
+     "n": 322
+    },
+    {
+     "name": "Conduits",
+     "n": 189
+    },
+    {
+     "name": "Pipe Accessories",
+     "n": 174
+    }
+   ]
+  },
+  {
+   "label": "13/F +47.30",
+   "elev": 47.3,
+   "elements": 1926,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 501
+    },
+    {
+     "name": "Pipes",
+     "n": 463
+    },
+    {
+     "name": "Generic Models",
+     "n": 184
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "14/F +50.45",
+   "elev": 50.45,
+   "elements": 1847,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipe Fittings",
+     "n": 436
+    },
+    {
+     "name": "Pipes",
+     "n": 403
+    },
+    {
+     "name": "Generic Models",
+     "n": 188
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "15/F +53.60",
+   "elev": 53.6,
+   "elements": 1857,
+   "slabs": 20,
+   "top_cats": [
+    {
+     "name": "Pipes",
+     "n": 495
+    },
+    {
+     "name": "Pipe Fittings",
+     "n": 446
+    },
+    {
+     "name": "Generic Models",
+     "n": 186
+    },
+    {
+     "name": "Conduits",
+     "n": 128
+    },
+    {
+     "name": "Conduit Fittings",
+     "n": 115
+    }
+   ]
+  },
+  {
+   "label": "R/F +56.75",
+   "elev": 56.75,
+   "elements": 436,
+   "slabs": 24,
+   "top_cats": [
+    {
+     "name": "Walls",
+     "n": 87
+    },
+    {
+     "name": "Pipe Fittings",
+     "n": 59
+    },
+    {
+     "name": "Pipes",
+     "n": 52
+    },
+    {
+     "name": "Doors",
+     "n": 50
+    },
+    {
+     "name": "Floors",
+     "n": 24
+    }
+   ]
+  },
+  {
+   "label": "UR/F +59.75",
+   "elev": 59.75,
+   "elements": 154,
+   "slabs": 10,
+   "top_cats": [
+    {
+     "name": "Walls",
+     "n": 65
+    },
+    {
+     "name": "Pipes",
+     "n": 18
+    },
+    {
+     "name": "Pipe Fittings",
+     "n": 18
+    },
+    {
+     "name": "Wall Sweeps",
+     "n": 12
+    },
+    {
+     "name": "Structural Framing",
+     "n": 10
+    }
+   ]
+  },
+  {
+   "label": "TR/F +63.25",
+   "elev": 63.25,
+   "elements": 27,
+   "slabs": 4,
+   "top_cats": [
+    {
+     "name": "Walls",
+     "n": 12
+    },
+    {
+     "name": "Floors",
+     "n": 4
+    },
+    {
+     "name": "Pipes",
+     "n": 3
+    },
+    {
+     "name": "Structural Framing",
+     "n": 2
+    },
+    {
+     "name": "Pipe Fittings",
+     "n": 2
+    }
+   ]
+  },
+  {
+   "label": "UNASSIGNED",
+   "elev": null,
+   "elements": 2409,
+   "slabs": 0,
+   "top_cats": [
+    {
+     "name": "Supports",
+     "n": 578
+    },
+    {
+     "name": "Structural Framing",
+     "n": 412
+    },
+    {
+     "name": "Lighting Fixtures",
+     "n": 376
+    },
+    {
+     "name": "Generic Models",
+     "n": 374
+    },
+    {
+     "name": "Electrical Fixtures",
+     "n": 238
+    }
+   ]
+  }
+ ],
+ "tags": {
+  "distinct": 1409,
+  "filled": 5638,
+  "empty": 34645,
+  "empty_pct": 86.0,
+  "duplicate_values": 926,
+  "extra_rows": 4229,
+  "worst": [
+   {
+    "mark": "104",
+    "n": 26
+   },
+   {
+    "mark": "112",
+    "n": 24
+   },
+   {
+    "mark": "149",
+    "n": 24
+   },
+   {
+    "mark": "100",
+    "n": 24
+   },
+   {
+    "mark": "Plumbing",
+    "n": 24
+   },
+   {
+    "mark": "108",
+    "n": 23
+   },
+   {
+    "mark": "207",
+    "n": 23
+   },
+   {
+    "mark": "109",
+    "n": 23
+   }
+  ]
+ },
+ "no_level": {
+  "n": 2409,
+  "pct": 6.0,
+  "by_sublayer": [
+   {
+    "name": "StairsRailing",
+    "n": 740
+   },
+   {
+    "name": "StructuralFraming",
+    "n": 412
+   },
+   {
+    "name": "LightingFixtures",
+    "n": 376
+   },
+   {
+    "name": "GenericModel",
+    "n": 374
+   },
+   {
+    "name": "ElectricalFixtures",
+    "n": 238
+   },
+   {
+    "name": "Walls",
+    "n": 87
+   },
+   {
+    "name": "PlumbingFixtures",
+    "n": 85
+   },
+   {
+    "name": "FireAlarmDevices",
+    "n": 54
+   }
+  ],
+  "sentinel": -2147483648
+ },
+ "mbb_evidence": {
+  "note": "Element mbb is NOT an element bbox: every row inherits a node-level cube with x/y in degrees and z in metres. Verified on the cached i3s attribute pages; recompute with the snippet in README.",
+  "rows_with_mbb": 40283,
+  "rows_where_dx_eq_dy_eq_dz": 40283,
+  "cube_pct": 100.0,
+  "node_groups": 1836,
+  "node_groups_with_single_mbb": 1836,
+  "side_deg_min": 0.051,
+  "side_deg_max": 122.472,
+  "side_deg_median": 54.182,
+  "slab_rows": 410,
+  "squaresum_note": "dx*dy summed over slabs = 887272.3, but the unit is deg^2 — not m^2. The app previously mislabelled it.",
+  "squaresum_deg2": 887272.3
+ }
+}

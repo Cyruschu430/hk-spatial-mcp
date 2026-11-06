@@ -1,0 +1,48 @@
+{
+ "plan": {
+  "no": "S/K1/28",
+  "name_en": "Tsim Sha Tsui",
+  "name_zh": "尖沙咀",
+  "approved": "2013-12-03",
+  "published": "2013-12-13",
+  "section": "9(1)(a)",
+  "scale": 5000,
+  "source": "Town Planning Board — Outline_Zoning_Plans_Planning_Scheme_Boundary (FeatureServer)",
+  "url": "https://services3.arcgis.com/6j1KwZfY2fZrfNMR/arcgis/rest/services/Outline_Zoning_Plans_Planning_Scheme_Boundary/FeatureServer"
+ },
+ "zone": {
+  "label": "C(6)",
+  "desc_en": "Commercial (6)",
+  "desc_zh": "商業(6)",
+  "area_m2": 3246,
+  "source": "OZP ZONE layer, point-in-polygon at model centre",
+  "note": "The model bbox straddles a C(6) zone and the MRDJ (Major Road and Junction) reservation: a 60×60 grid over the footprint lands 63.1% inside C(6) and 36.9% inside MRDJ."
+ },
+ "height": {
+  "type": "mPD",
+  "value": 110.0,
+  "at": "model centre",
+  "area_m2": 3810,
+  "grid": {
+   "110": 55.2,
+   "130": 7.8,
+   "none": 36.9
+  },
+  "note": "Height control is not uniform across the footprint: 110 m covers 55.2% of the grid, 130 m covers 7.8%, and 36.9% (the road reservation) carries no BHC row at all — a single-number answer would be wrong here."
+ },
+ "lots": {
+  "under_bbox": 22,
+  "containing_centre": "559006349",
+  "in_site_area": 442,
+  "source": "Lot_in_Hong_Kong (Lands Department)"
+ },
+ "topography": {
+  "ground_elev_m": 57.5,
+  "source": "Esri Terrain3D via hk-spatial elevation_at"
+ },
+ "model_top": {
+  "highest_level": "TR/F +63.25",
+  "highest_elev_m": 63.25,
+  "note": "Levels are named by absolute mPD, so the roof plant room sits ~63.3 mPD — 5.8 m above the surveyed ground surface, not a 63 m tower."
+ }
+}

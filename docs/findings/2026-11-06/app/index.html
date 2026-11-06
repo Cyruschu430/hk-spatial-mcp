@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>PXXCICXXZZA — BIM Audit &amp; Statutory Context</title>
+<link rel="icon" href="data:," />
+<link rel="stylesheet" href="https://js.arcgis.com/5.0/@arcgis/core/assets/esri/themes/light/main.css" />
+<link rel="stylesheet" href="assets/app.css" />
+</head>
+<body>
+
+<!-- ============ TOP BAR ============ -->
+<header id="bar">
+  <div class="brand">
+    <span class="mark">◆</span>
+    <div>
+      <h1>PXXCICXXZZA <span class="thin">BIM Audit</span></h1>
+      <p class="sub">Tsim Sha Tsui · OZP S/K1/28 · <span id="stamp"></span></p>
+    </div>
+  </div>
+  <nav id="tabs" role="tablist">
+    <button role="tab" data-view="overview" class="on">Overview</button>
+    <button role="tab" data-view="model">3D Model</button>
+    <button role="tab" data-view="findings">Findings</button>
+    <button role="tab" data-view="context">Statutory</button>
+  </nav>
+  <div class="meta">
+    <span class="pill"><b id="elCount">40,283</b> elements</span>
+    <span class="pill"><b>61</b> disciplines-sublayers</span>
+    <span class="pill src">CSDI + OZP</span>
+  </div>
+</header>
+
+<!-- ============ OVERVIEW ============ -->
+<main id="view-overview" class="view on">
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="kicker">Data-quality audit · i3s 1.9</p>
+      <h2>The model is <em>large</em>, <em>detailed</em>,<br>and not yet fit for compliance use.</h2>
+      <p class="lede">
+        40,283 elements across 27 named levels, published as a CIC BIM sample on ArcGIS Online.
+        The geometry streams well. The <strong>attribute layer does not</strong>: 86% of components carry
+        no Mark, 926 Mark values repeat, and 2,409 elements sit on a level whose ID is the sentinel
+        <code>-2147483648</code>. Slabs survive on 25 of 27 levels, which means areas cannot be
+        summed from this model — only counted.
+      </p>
+      <div class="verdicts">
+        <span class="v fail">Marks — fail</span>
+        <span class="v fail">Level assignment — fail</span>
+        <span class="v fail">Slab coverage — fail</span>
+        <span class="v pass">Geometry — pass</span>
+        <span class="v cant">GFA · compartment · clearance — cannot check</span>
+      </div>
+    </div>
+    <div class="hero-num">
+      <div class="big" id="scIssues">3</div>
+      <div class="biglbl">blocking data issues</div>
+      <div class="spark" id="heroBars"></div>
+      <p class="tiny">Elements by discipline</p>
+    </div>
+  </section>
+
+  <section class="grid4" id="kpis"></section>
+
+  <section class="panels">
+    <div class="panel">
+      <h3>Elements by discipline <span class="hint">all 40,283</span></h3>
+      <div id="chartDisc" class="chart"></div>
+    </div>
+    <div class="panel">
+      <h3>Top categories <span class="hint">Piping dominates — 45.4% of the model</span></h3>
+      <div id="chartCat" class="chart scroll"></div>
+    </div>
+  </section>
+
+  <section class="panels">
+    <div class="panel">
+      <h3>Level stack <span class="hint">bar = element count · dot = slabs present</span></h3>
+      <div id="chartLevels" class="chart tall"></div>
+    </div>
+    <div class="panel">
+      <h3>Attribute completeness <span class="hint">% of 40,283 elements with a value</span></h3>
+      <div id="chartFill" class="chart"></div>
+      <p class="note">Percentages are <b>filled</b>. The audit tool reports <code>completeness_pct</code> as
+        <em>% empty</em> — Mark 86.0 means only 14% carry one.</p>
+    </div>
+  </section>
+
+  <section class="panel sources">
+    <h3>Sources &amp; method <span class="hint">every number on this page traces to one of these</span></h3>
+    <div class="srclist">
+      <div class="srcrow">
+        <span class="sk">BIM geometry &amp; attributes</span>
+        <span class="sv">Scene service <code>PXXCICXXZZA</code> · i3s 1.9 · public · CIC BIM sample</span>
+      </div>
+      <div class="srcrow">
+        <span class="sk">Blocks &amp; zones</span>
+        <span class="sv">Town Planning Board OZP <code>ZONE</code> layer + <code>S/K1/28</code> scheme boundary</span>
+      </div>
+      <div class="srcrow">
+        <span class="sk">Height control</span>
+        <span class="sv"><code>Outline_Zoning_Plans_Building_Height_Control_Areas</code></span>
+      </div>
+      <div class="srcrow">
+        <span class="sk">Lots</span>
+        <span class="sv">Lands Department <code>Lot_in_Hong_Kong</code> · CSDI <code>landsd_rcd_1637217253134_22729</code></span>
+      </div>
+      <div class="srcrow">
+        <span class="sk">Roads</span>
+        <span class="sv">Lands Department <code>Road Centreline</code> · CSDI <code>landsd_rcd_1637310758814_80061</code></span>
+      </div>
+      <div class="srcrow">
+        <span class="sk">Ground level</span>
+        <span class="sv">Esri Terrain3D — 57.5 mPD at the site centre</span>
+      </div>
+    </div>
+    <p class="note">Read over i3s node pages by hk-spatial (CSDI). Element positions come from i3s node
+      anchors, so they locate the building, not individual components. Areas are element-bbox upper
+      bounds, never statutory GFA. OZP and height controls here are public mirrors — the statutory
+      plan prevails, and this is not an Esri product.</p>
+  </section>
+</main>
+
+<!-- ============ 3D MODEL ============ -->
+<main id="view-model" class="view">
+  <div id="scene3d"></div>
+
+  <aside id="modelPanel">
+    <div class="ph">
+      <h3>Live model</h3>
+      <p class="tiny">Streaming from the public scene service. Filters act on the real layer.</p>
+    </div>
+
+    <div class="fld">
+      <label>Discipline</label>
+      <div class="chips" id="discChips"></div>
+    </div>
+
+    <div class="fld">
+      <label>Level <span class="cnt" id="lvlLbl">all</span></label>
+      <div class="chips tight" id="lvlChips"></div>
+    </div>
+
+    <div class="fld">
+      <label>Category <span class="cnt" id="catLbl">all 45</span></label>
+      <div class="catlist" id="catList"></div>
+    </div>
+
+    <div class="fld">
+      <label>Camera</label>
+      <div class="btnrow">
+        <button id="btnHome" class="btn">Frame model</button>
+        <button id="btnTop" class="btn">Top down</button>
+        <button id="btnReset" class="btn">Reset filters</button>
+      </div>
+    </div>
+
+    <div class="fld">
+      <label>Read a real component <span class="cnt" id="elIdx">1 / 198</span></label>
+      <div class="btnrow" style="margin-bottom:6px">
+        <button id="btnPrev" class="btn">← prev</button>
+        <button id="btnNext" class="btn">next →</button>
+        <button id="btnPickDup" class="btn">show a duplicate Mark</button>
+      </div>
+      <div id="pickBox" class="pick empty">Loading element records…</div>
+    </div>
+  </aside>
+
+  <div id="sceneStatus" class="sstatus">loading scene…</div>
+</main>
+
+<!-- ============ FINDINGS ============ -->
+<main id="view-findings" class="view">
+  <div class="fhead">
+    <div>
+      <p class="kicker">Three findings that block downstream use</p>
+      <h2>What breaks, and what it costs you</h2>
+    </div>
+    <div class="legend">
+      <span class="v fail">fail</span><span class="v warn">at risk</span><span class="v cant">cannot check</span>
+    </div>
+  </div>
+  <div id="cards" class="cards"></div>
+
+  <section class="panels wide">
+    <div class="panel">
+      <h3>Duplicate Mark values <span class="hint">926 values cover 5,638 tagged elements</span></h3>
+      <div id="chartDup" class="chart"></div>
+      <p class="note">A join on <code>Mark</code> returns 4,229 extra rows before it returns a wrong answer.
+        Asset registers, COBie drops and maintenance tickets all key on this field.</p>
+    </div>
+    <div class="panel">
+      <h3>Where the 2,409 unassigned elements live <span class="hint">level ID = −2147483648</span></h3>
+      <div id="chartNoLevel" class="chart"></div>
+      <p class="note">Stairs railings are the largest group. Floor-by-floor quantities silently omit them,
+        so every storey subtotal is low.</p>
+    </div>
+  </section>
+</main>
+
+<!-- ============ STATUTORY ============ -->
+<main id="view-context" class="view">
+  <div id="map2d"></div>
+  <aside id="ctxPanel">
+    <div class="ph">
+      <h3>S/K1/28 · Tsim Sha Tsui</h3>
+      <p class="tiny">Approved <span id="planDate"></span> · scale 1:5,000 · s.9(1)(a)</p>
+    </div>
+
+    <div class="stat">
+      <span class="k">Zoning at centre</span>
+      <span class="val"><b id="zoneLbl">C(6)</b> <span id="zoneDesc">Commercial (6)</span></span>
+    </div>
+    <div class="stat">
+      <span class="k">Height control</span>
+      <span class="val"><b id="bhcVal">110</b> mPD <span class="dim">at centre</span></span>
+    </div>
+    <div class="stat">
+      <span class="k">Lots under footprint</span>
+      <span class="val"><b id="lotN">22</b> <span class="dim">bbox level</span></span>
+    </div>
+    <div class="stat">
+      <span class="k">Modelled top level</span>
+      <span class="val"><b id="topLvl">63.25</b> mPD</span>
+    </div>
+
+    <div class="fld">
+      <label>Layers</label>
+      <div class="layers" id="layerToggles"></div>
+    </div>
+
+    <div id="ctxPick" class="pick empty">Click a zone, lot or control area to read its attributes.</div>
+
+    <div class="fld">
+      <label>Height headroom</label>
+      <div id="headroom" class="headroom"></div>
+      <p class="note sm">Height controls are per-area: the C(6) parcel carries 110 mPD, a strip to the east
+        130 mPD, and the road reservation carries no control. Values are the public mirror — the statutory plan prevails.</p>
+    </div>
+
+    <div class="fld">
+      <label>Basemap</label>
+      <div class="chips" id="baseChips"></div>
+    </div>
+  </aside>
+</main>
+
+<footer id="foot">
+  <span>Scene: CIC BIM sample <b>PXXCICXXZZA</b> (public, i3s 1.9) · OZP &amp; lot geometry: Town Planning Board / Lands Department mirrors · Basemap: Esri</span>
+  <span class="pw">Powered by <b>Esri</b> · Prepared with hk-spatial (CSDI)</span>
+</footer>
+
+<script type="module" src="assets/app.js"></script>
+</body>
+</html>

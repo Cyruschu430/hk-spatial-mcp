@@ -799,6 +799,15 @@ into i3s **nodes**.
 > lists what is single-sample or unresolved — read
 > [`open-questions.md`](docs/findings/2026-11-05/open-questions.md) before quoting a number from here.
 
+> **A second, independent audit** — 40,283 elements on the Tsim Sha Tsui model `PXXCICXXZZA`,
+> against the OZP at `S/K1/28` — is in
+> **[`docs/findings/2026-11-06/`](docs/findings/2026-11-06/)**, with the working 4-tab app, raw
+> query results and screenshots. Two findings there are worth carrying forward: `Mark` is empty on
+> **86.0%** of elements and its 926 duplicate values silently add **4,229** join rows; and the
+> element `mbb` is **not an element bounding box** — all 40,283 rows inherit a node-level cube whose
+> x/y are in **degrees**, so any area or volume computed from it is a unit error. That directory
+> also records a case where this project's own figures were labelled m² when they were deg².
+
 
 An i3s node is the unit the renderer draws and hides. A predicate does not select elements inside a
 node; it selects the node. So if nodes span storeys, a storey filter cannot work:
